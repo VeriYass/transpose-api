@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Transpose — data format converter</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/fast-xml-parser/4.3.2/fxparser.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -264,8 +263,69 @@ const meter = document.getElementById('meter');
 const pipes = ['p1','p2','p3','p4','p5'].map(id => document.getElementById(id));
 
 let remaining = 500;
-const parser = new fxparser.XMLParser({ ignoreAttributes: false });
-const builder = new fxparser.XMLBuilder({ ignoreAttributes: false, format: true });
+// Self-contained XML support using only native browser APIs (no CDN dependency,
+// which had a known reliability bug where the library's global export sometimes
+// failed to load, silently breaking every script on the page).
+function xmlToObj(text){
+  const doc = new DOMParser().parseFromString(text, 'text/xml');
+  const errorNode = doc.querySelector('parsererror');
+  if(errorNode) throw new Error('Invalid XML: ' + errorNode.textContent.trim().slice(0, 200));
+  function elementToObj(el){
+    const children = Array.from(el.children);
+    if(children.length === 0){
+      const t = el.textContent.trim();
+      return t === '' ? null : t;
+    }
+    const obj = {};
+    children.forEach(child => {
+      const val = elementToObj(child);
+      if(obj[child.tagName] !== undefined){
+        if(!Array.isArray(obj[child.tagName])) obj[child.tagName] = [obj[child.tagName]];
+        obj[child.tagName].push(val);
+      }else{
+        obj[child.tagName] = val;
+      }
+    });
+    return obj;
+  }
+  const root = doc.documentElement;
+  return { [root.tagName]: elementToObj(root) };
+}
+
+function escapeXml(str){
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function objToXmlNode(key, value, indent){
+  const pad = '  '.repeat(indent);
+  if(Array.isArray(value)){
+    return value.map(v => objToXmlNode(key, v, indent)).join('\n');
+  }
+  if(value !== null && typeof value === 'object'){
+    const inner = Object.entries(value).map(([k, v]) => objToXmlNode(k, v, indent + 1)).join('\n');
+    return `${pad}<${key}>\n${inner}\n${pad}</${key}>`;
+  }
+  return `${pad}<${key}>${escapeXml(value)}</${key}>`;
+}
+
+function objToXml(data){
+  if(Array.isArray(data)){
+    const inner = data.map(item => objToXmlNode('item', item, 1)).join('\n');
+    return `<root>\n${inner}\n</root>`;
+  }
+  const entries = Object.entries(data);
+  if(entries.length === 1){
+    const [key, value] = entries[0];
+    return objToXmlNode(key, value, 0);
+  }
+  const inner = entries.map(([k, v]) => objToXmlNode(k, v, 1)).join('\n');
+  return `<root>\n${inner}\n</root>`;
+}
 
 function csvToObj(text){
   const lines = text.trim().split(/\r?\n/).filter(l => l.length);
@@ -301,7 +361,7 @@ function parseInput(text, fmt){
   if(fmt === 'json') return JSON.parse(text);
   if(fmt === 'yaml') return jsyaml.load(text);
   if(fmt === 'csv') return csvToObj(text);
-  if(fmt === 'xml') return parser.parse(text);
+  if(fmt === 'xml') return xmlToObj(text);
   throw new Error('Unknown source format');
 }
 
@@ -309,7 +369,7 @@ function serializeOutput(data, fmt){
   if(fmt === 'json') return JSON.stringify(data, null, 2);
   if(fmt === 'yaml') return jsyaml.dump(data);
   if(fmt === 'csv') return objToCsv(data);
-  if(fmt === 'xml') return builder.build(Array.isArray(data) ? { root: { item: data } } : data);
+  if(fmt === 'xml') return objToXml(data);
   throw new Error('Unknown target format');
 }
 
