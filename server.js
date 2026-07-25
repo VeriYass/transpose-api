@@ -178,6 +178,31 @@ app.post('/api/checkout', async (req, res) => {
   }
 });
 
+// ---- After-checkout key retrieval ----
+// The Stripe payment link redirects to /success?session_id={CHECKOUT_SESSION_ID}.
+// The success page polls this endpoint until the webhook has issued the key.
+app.get('/api/key-for-session', async (req, res) => {
+  const { session_id: sessionId } = req.query || {};
+  if (!sessionId || !String(sessionId).startsWith('cs_')) {
+    return res.status(400).json({ error: 'bad_session_id' });
+  }
+  try {
+    const session = await stripe.checkout.sessions.retrieve(String(sessionId));
+    if (session.payment_status !== 'paid') {
+      return res.status(402).json({ error: 'not_paid' });
+    }
+    const apiKey = db.getApiKeyByCustomer(session.customer);
+    if (!apiKey) {
+      // Webhook may not have processed yet; client will retry.
+      return res.status(202).json({ status: 'pending' });
+    }
+    res.json({ apiKey });
+  } catch (err) {
+    console.error('key-for-session failed:', err.message);
+    res.status(500).json({ error: 'lookup_failed' });
+  }
+});
+
 // ---- Look up usage for the currently-authenticated key ----
 app.get('/api/usage', requireApiKey, (req, res) => {
   res.json({ plan: req.plan, used: req.usedThisMonth, limit: req.planLimit });

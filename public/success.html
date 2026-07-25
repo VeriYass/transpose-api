@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Welcome to Transpose</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0E1116; --surface:#161B22; --border:#2A323C; --text:#E6EDF3;
+    --text-dim:#8B96A5; --accent:#E8A559; --ok:#6FCF97; --err:#E5707A;
+    --mono:'IBM Plex Mono',ui-monospace,monospace; --sans:'IBM Plex Sans',sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--mono);
+    display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px;}
+  .card{max-width:640px;width:100%;background:var(--surface);border:1px solid var(--border);
+    border-radius:10px;padding:36px;}
+  h1{font-family:var(--sans);font-weight:600;font-size:26px;margin:0 0 8px;}
+  h1 .ok{color:var(--ok)}
+  p{font-family:var(--sans);color:var(--text-dim);font-size:14px;line-height:1.7;margin:0 0 18px;}
+  .keybox{background:var(--bg);border:1px solid var(--border);border-radius:8px;
+    padding:16px;font-size:14px;word-break:break-all;margin-bottom:14px;min-height:54px;
+    display:flex;align-items:center;justify-content:space-between;gap:12px;}
+  .keybox .spin{color:var(--text-dim);font-size:13px}
+  button{background:var(--accent);color:#1A1300;border:none;font-family:var(--mono);
+    font-weight:600;font-size:13px;padding:10px 16px;border-radius:6px;cursor:pointer;white-space:nowrap;}
+  button:hover{background:#F0B672}
+  .warn{border-left:3px solid var(--accent);padding:10px 14px;background:#1C1710;
+    font-size:13px;color:var(--text);font-family:var(--sans);border-radius:0 6px 6px 0;margin-bottom:18px;}
+  pre{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;
+    font-size:12px;line-height:1.7;overflow-x:auto;}
+  .k{color:#79B8FF}.s{color:var(--ok)}.c{color:var(--text-dim)}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1><span class="ok">✓</span> Payment received — welcome aboard</h1>
+  <p>Your API key is being generated. It will appear below within a few seconds.</p>
+
+  <div class="keybox">
+    <span id="keyText" class="spin">Issuing your key…</span>
+    <button id="copyBtn" style="display:none">Copy</button>
+  </div>
+
+  <div class="warn">Save this key now — treat it like a password. It won't be shown again on this page after you leave.</div>
+
+  <p>Use it right away:</p>
+  <pre><span class="c">curl https://transpose-api-production.up.railway.app/v1/convert \</span>
+  -H <span class="s">"Authorization: Bearer YOUR_KEY"</span> \
+  -H <span class="k">"Content-Type: application/json"</span> \
+  -d <span class="s">'{"from":"csv","to":"json","data":"name,age\nPriya,31"}'</span></pre>
+
+  <p>Questions or issues? Reply to your Stripe receipt email and we'll get back to you.</p>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const sessionId = params.get('session_id');
+const keyText = document.getElementById('keyText');
+const copyBtn = document.getElementById('copyBtn');
+let attempts = 0;
+
+async function fetchKey(){
+  if(!sessionId){
+    keyText.textContent = 'Missing session reference. Contact support with your receipt.';
+    return;
+  }
+  attempts++;
+  try{
+    const res = await fetch('/api/key-for-session?session_id=' + encodeURIComponent(sessionId));
+    if(res.status === 200){
+      const data = await res.json();
+      keyText.textContent = data.apiKey;
+      keyText.classList.remove('spin');
+      copyBtn.style.display = 'inline-block';
+      return;
+    }
+    if(res.status === 202 && attempts < 20){
+      setTimeout(fetchKey, 3000);
+      return;
+    }
+    if(res.status === 402){
+      keyText.textContent = 'Payment not confirmed yet. Refresh in a minute.';
+      return;
+    }
+    keyText.textContent = attempts < 20 ? 'Still working…' : 'Taking longer than expected — refresh this page, or contact support with your receipt.';
+    if(attempts < 20) setTimeout(fetchKey, 3000);
+  }catch(e){
+    if(attempts < 20) setTimeout(fetchKey, 3000);
+    else keyText.textContent = 'Connection issue — refresh this page.';
+  }
+}
+copyBtn.addEventListener('click', () => {
+  navigator.clipboard.writeText(keyText.textContent);
+  copyBtn.textContent = 'Copied';
+  setTimeout(()=>copyBtn.textContent='Copy', 1200);
+});
+fetchKey();
+</script>
+</body>
+</html>

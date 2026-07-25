@@ -53,6 +53,16 @@ function getApiKey(apiKey) {
   return data.apiKeys[apiKey] || null;
 }
 
+function getApiKeyByCustomer(stripeCustomerId) {
+  const data = load();
+  for (const [key, rec] of Object.entries(data.apiKeys)) {
+    if (rec.stripeCustomerId === stripeCustomerId && rec.active) {
+      return key;
+    }
+  }
+  return null;
+}
+
 function revokeApiKeysForCustomer(stripeCustomerId) {
   const data = load();
   for (const key of Object.keys(data.apiKeys)) {
@@ -97,6 +107,7 @@ module.exports = {
   getCustomer,
   createApiKey,
   getApiKey,
+  getApiKeyByCustomer,
   revokeApiKeysForCustomer,
   updatePlanForCustomer,
   recordUsage,
