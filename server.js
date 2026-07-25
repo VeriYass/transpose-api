@@ -107,8 +107,10 @@ app.post(
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
-// Serve the customer-facing site (public/index.html) at the root URL
-app.use(express.static('public'));
+// Serve the customer-facing site (public/index.html) at the root URL.
+// { extensions: ['html'] } makes /success resolve to public/success.html,
+// since Stripe redirects to a clean path with no .html suffix.
+app.use(express.static('public', { extensions: ['html'] }));
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
