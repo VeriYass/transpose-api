@@ -206,20 +206,23 @@
         <div class="tiers">
           <div class="tier">
             <div><div class="tier-name">Free</div><div class="tier-desc">For trying it in your codebase</div></div>
-            <div class="tier-price">100 calls/mo</div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div class="tier-price">100 calls/mo</div>
+              <button id="freeKeyBtn" style="background:none;border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-weight:600;font-size:12px;padding:8px 14px;border-radius:6px;cursor:pointer;white-space:nowrap">Get free key</button>
+            </div>
           </div>
           <div class="tier featured">
             <div><div class="tier-name">Build</div><div class="tier-desc">For a live pipeline</div></div>
             <div style="display:flex;align-items:center;gap:12px">
               <div class="tier-price">$19/mo · 5,000 calls</div>
-              <a href="https://buy.stripe.com/8x214ofC1ehd1XcbP8fjG00" style="background:var(--accent);color:#1A1300;text-decoration:none;font-weight:600;font-size:12px;padding:8px 14px;border-radius:6px;white-space:nowrap">Subscribe</a>
+              <a href="https://buy.stripe.com/aFadRaahHflhatI06qfjG01" style="background:var(--accent);color:#1A1300;text-decoration:none;font-weight:600;font-size:12px;padding:8px 14px;border-radius:6px;white-space:nowrap">Subscribe</a>
             </div>
           </div>
           <div class="tier">
             <div><div class="tier-name">Scale</div><div class="tier-desc">For production workloads</div></div>
             <div style="display:flex;align-items:center;gap:12px">
               <div class="tier-price">$49/mo · 25,000 calls</div>
-              <a href="SCALE_LINK_PLACEHOLDER" style="background:none;border:1px solid var(--accent-dim);color:var(--accent);text-decoration:none;font-weight:600;font-size:12px;padding:8px 14px;border-radius:6px;white-space:nowrap">Subscribe</a>
+              <a href="https://buy.stripe.com/8x214ofC1ehd1XcbP8fjG00" id="scaleSubscribeLink" style="background:none;border:1px solid var(--accent-dim);color:var(--accent);text-decoration:none;font-weight:600;font-size:12px;padding:8px 14px;border-radius:6px;white-space:nowrap">Subscribe</a>
             </div>
           </div>
           <div class="tier">
@@ -367,6 +370,83 @@ document.getElementById('swapBtn').addEventListener('click', () => {
 document.getElementById('copyBtn').addEventListener('click', () => {
   navigator.clipboard.writeText(outputArea.textContent);
   const btn = document.getElementById('copyBtn');
+  const orig = btn.textContent;
+  btn.textContent = 'Copied';
+  setTimeout(() => btn.textContent = orig, 1200);
+});
+
+// ---- Free tier: get an API key with just an email ----
+const freeModal = document.createElement('div');
+freeModal.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:999;align-items:center;justify-content:center;padding:20px';
+freeModal.innerHTML = `
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:28px;max-width:420px;width:100%;font-family:var(--sans)">
+    <h3 style="font-family:var(--sans);font-weight:600;font-size:18px;margin:0 0 6px;color:var(--text)">Get a free API key</h3>
+    <p style="color:var(--text-dim);font-size:13px;margin:0 0 16px;line-height:1.6">100 calls/month, no card required.</p>
+    <div id="freeStep1">
+      <input id="freeEmailInput" type="email" placeholder="you@example.com" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 12px;border-radius:6px;margin-bottom:12px;box-sizing:border-box">
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button id="freeCancelBtn" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-family:var(--mono);font-size:13px;padding:9px 16px;border-radius:6px;cursor:pointer">Cancel</button>
+        <button id="freeSubmitBtn" style="background:var(--accent);color:#1A1300;border:none;font-family:var(--mono);font-weight:600;font-size:13px;padding:9px 16px;border-radius:6px;cursor:pointer">Get key</button>
+      </div>
+    </div>
+    <div id="freeStep2" style="display:none">
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-family:var(--mono);font-size:13px;word-break:break-all;margin-bottom:10px" id="freeKeyResult"></div>
+      <div style="color:var(--err);font-size:12px;font-family:var(--sans);margin-bottom:14px">Save this now — it won't be shown again.</div>
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button id="freeCopyBtn" style="background:none;border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:13px;padding:9px 16px;border-radius:6px;cursor:pointer">Copy</button>
+        <button id="freeCloseBtn" style="background:var(--accent);color:#1A1300;border:none;font-family:var(--mono);font-weight:600;font-size:13px;padding:9px 16px;border-radius:6px;cursor:pointer">Done</button>
+      </div>
+    </div>
+  </div>`;
+document.body.appendChild(freeModal);
+
+function openFreeModal(){
+  freeModal.style.display = 'flex';
+  document.getElementById('freeStep1').style.display = 'block';
+  document.getElementById('freeStep2').style.display = 'none';
+  document.getElementById('freeEmailInput').value = '';
+}
+function closeFreeModal(){ freeModal.style.display = 'none'; }
+
+document.getElementById('freeKeyBtn').addEventListener('click', openFreeModal);
+document.getElementById('freeCancelBtn').addEventListener('click', closeFreeModal);
+document.getElementById('freeCloseBtn').addEventListener('click', closeFreeModal);
+freeModal.addEventListener('click', (e) => { if(e.target === freeModal) closeFreeModal(); });
+
+document.getElementById('freeSubmitBtn').addEventListener('click', async () => {
+  const email = document.getElementById('freeEmailInput').value.trim();
+  if(!email || !email.includes('@')){
+    document.getElementById('freeEmailInput').style.borderColor = 'var(--err)';
+    return;
+  }
+  const btn = document.getElementById('freeSubmitBtn');
+  btn.textContent = 'Issuing…';
+  btn.disabled = true;
+  try{
+    const res = await fetch('/api/signup-free', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email })
+    });
+    const data = await res.json();
+    if(res.ok && data.apiKey){
+      document.getElementById('freeKeyResult').textContent = data.apiKey;
+      document.getElementById('freeStep1').style.display = 'none';
+      document.getElementById('freeStep2').style.display = 'block';
+    }else{
+      btn.textContent = 'Get key';
+      btn.disabled = false;
+      document.getElementById('freeEmailInput').style.borderColor = 'var(--err)';
+    }
+  }catch(e){
+    btn.textContent = 'Get key';
+    btn.disabled = false;
+  }
+});
+
+document.getElementById('freeCopyBtn').addEventListener('click', () => {
+  navigator.clipboard.writeText(document.getElementById('freeKeyResult').textContent);
+  const btn = document.getElementById('freeCopyBtn');
   const orig = btn.textContent;
   btn.textContent = 'Copied';
   setTimeout(() => btn.textContent = orig, 1200);
