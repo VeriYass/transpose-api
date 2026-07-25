@@ -107,6 +107,9 @@ app.post(
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
+// Serve the customer-facing site (public/index.html) at the root URL
+app.use(express.static('public'));
+
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 // ---- Conversion endpoint (the actual product) ----
