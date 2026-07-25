@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Transpose — data format converter</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fast-xml-parser/4.3.2/fxparser.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #0E1116;
+    --surface: #161B22;
+    --surface-2: #1C232C;
+    --border: #2A323C;
+    --text: #E6EDF3;
+    --text-dim: #8B96A5;
+    --accent: #E8A559;
+    --accent-dim: #7A5A32;
+    --ok: #6FCF97;
+    --err: #E5707A;
+    --mono: 'IBM Plex Mono', ui-monospace, monospace;
+    --sans: 'IBM Plex Sans', sans-serif;
+  }
+  *{ box-sizing: border-box; }
+  html{ scroll-behavior: smooth; }
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family: var(--mono);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap{ max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+
+  /* HEADER */
+  header{ padding: 56px 0 28px; border-bottom: 1px solid var(--border); }
+  .eyebrow{
+    font-size: 12px; letter-spacing: 0.14em; color: var(--accent);
+    text-transform: uppercase; margin-bottom: 14px; display:flex; align-items:center; gap:10px;
+  }
+  .eyebrow .dot{ width:6px; height:6px; border-radius:50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  h1{
+    font-family: var(--sans); font-weight: 600; font-size: 40px; line-height: 1.15;
+    margin: 0 0 12px; letter-spacing: -0.01em;
+  }
+  h1 .arrow{ color: var(--accent); font-weight: 400; }
+  .sub{ font-family: var(--sans); color: var(--text-dim); font-size: 15px; max-width: 560px; line-height:1.6; margin:0; }
+
+  /* CONVERTER */
+  .converter{ padding: 32px 0; }
+  .format-row{ display:flex; align-items:center; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+  select{
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    font-family: var(--mono); font-size: 13px; padding: 9px 14px; border-radius: 6px;
+    appearance: none; cursor: pointer; min-width: 120px;
+  }
+  select:focus-visible, textarea:focus-visible, button:focus-visible{
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  .swap-btn{
+    background: none; border: 1px solid var(--border); color: var(--text-dim);
+    width: 32px; height: 32px; border-radius: 6px; cursor: pointer; font-size: 14px;
+    display:flex; align-items:center; justify-content:center; transition: all .15s ease;
+  }
+  .swap-btn:hover{ color: var(--accent); border-color: var(--accent-dim); transform: rotate(180deg); }
+
+  .panes{ display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  @media (max-width: 720px){ .panes{ grid-template-columns: 1fr; } }
+  .pane{ background: var(--surface); display:flex; flex-direction:column; }
+  .pane-head{
+    padding: 10px 14px; font-size: 11px; letter-spacing: 0.08em; color: var(--text-dim);
+    text-transform: uppercase; border-bottom: 1px solid var(--border); display:flex; justify-content:space-between; align-items:center;
+  }
+  .pane-head span.status{ text-transform:none; letter-spacing:0; font-size:11px; }
+  textarea{
+    background: var(--surface); color: var(--text); border: none; resize: none;
+    font-family: var(--mono); font-size: 13px; line-height: 1.6; padding: 16px 14px;
+    width: 100%; height: 320px; outline: none;
+  }
+  textarea::placeholder{ color: #4A5568; }
+  .out-scroll{ height: 320px; overflow: auto; }
+  .out-scroll pre{ margin:0; padding: 16px 14px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+
+  .actions{ display:flex; justify-content: space-between; align-items:center; margin-top: 14px; flex-wrap: wrap; gap: 10px; }
+  .meter{ font-size: 12px; color: var(--text-dim); }
+  .meter b{ color: var(--text); font-weight: 600; }
+  .btn-group{ display:flex; gap: 10px; }
+  button.primary{
+    background: var(--accent); color: #1A1300; border: none; font-family: var(--mono);
+    font-weight: 600; font-size: 13px; padding: 10px 18px; border-radius: 6px; cursor: pointer;
+    transition: transform .1s ease, background .15s ease;
+  }
+  button.primary:hover{ background: #F0B672; }
+  button.primary:active{ transform: scale(0.98); }
+  button.ghost{
+    background: none; border: 1px solid var(--border); color: var(--text-dim); font-family: var(--mono);
+    font-size: 13px; padding: 10px 16px; border-radius: 6px; cursor: pointer;
+  }
+  button.ghost:hover{ color: var(--text); border-color: var(--text-dim); }
+
+  /* SIGNATURE: pipeline strip */
+  .pipeline{ margin: 40px 0; }
+  .pipeline-label{ font-size: 11px; letter-spacing: .08em; color: var(--text-dim); text-transform: uppercase; margin-bottom: 10px; }
+  .pipe-strip{
+    display:flex; align-items:center; font-size: 12px; color: var(--text-dim); overflow-x:auto;
+    border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; background: var(--surface);
+  }
+  .pipe-strip .seg{ white-space:nowrap; }
+  .pipe-strip .seg.active{ color: var(--ok); }
+  .pipe-strip .join{ color: var(--accent); margin: 0 10px; }
+
+  /* API SECTION */
+  .api-section{ border-top: 1px solid var(--border); padding: 56px 0; }
+  .api-grid{ display:grid; grid-template-columns: 1.1fr 1fr; gap: 48px; }
+  @media (max-width: 800px){ .api-grid{ grid-template-columns: 1fr; } }
+  .api-copy h2{ font-family: var(--sans); font-size: 24px; font-weight: 600; margin: 0 0 12px; letter-spacing:-0.01em; }
+  .api-copy p{ font-family: var(--sans); color: var(--text-dim); font-size: 14px; line-height: 1.7; margin: 0 0 22px; max-width: 460px; }
+  .tiers{ display:flex; flex-direction:column; gap: 10px; }
+  .tier{
+    border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px;
+    display:flex; justify-content: space-between; align-items:center; background: var(--surface);
+  }
+  .tier.featured{ border-color: var(--accent-dim); background: linear-gradient(180deg, #1C1710, var(--surface)); }
+  .tier-name{ font-size: 13px; font-weight: 600; }
+  .tier-desc{ font-size: 11px; color: var(--text-dim); margin-top: 3px; font-family: var(--sans); }
+  .tier-price{ font-size: 13px; color: var(--accent); text-align:right; white-space:nowrap; }
+
+  .code-block{
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow:hidden;
+  }
+  .code-head{ padding: 9px 14px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text-dim); display:flex; justify-content:space-between; }
+  .code-block pre{ margin:0; padding: 16px 14px; font-size: 12px; line-height: 1.7; overflow-x:auto; }
+  .code-block .k{ color: #79B8FF; }
+  .code-block .s{ color: var(--ok); }
+  .code-block .c{ color: var(--text-dim); }
+
+  footer{ border-top: 1px solid var(--border); padding: 24px 0 48px; font-size: 12px; color: var(--text-dim); font-family: var(--sans); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow"><span class="dot"></span>Deterministic conversion — no data leaves your browser in demo mode</div>
+    <h1>CSV <span class="arrow">→</span> JSON <span class="arrow">→</span> YAML <span class="arrow">→</span> XML</h1>
+    <p class="sub">Paste structured data on the left, get a clean, valid conversion on the right. Same engine runs behind the API — every rule below is exactly what your requests will hit in production.</p>
+  </header>
+
+  <section class="converter">
+    <div class="format-row">
+      <select id="fromFormat">
+        <option value="json">JSON</option>
+        <option value="csv">CSV</option>
+        <option value="yaml">YAML</option>
+        <option value="xml">XML</option>
+      </select>
+      <button class="swap-btn" id="swapBtn" title="Swap direction">⇄</button>
+      <select id="toFormat">
+        <option value="yaml">YAML</option>
+        <option value="csv">CSV</option>
+        <option value="json">JSON</option>
+        <option value="xml">XML</option>
+      </select>
+    </div>
+
+    <div class="panes">
+      <div class="pane">
+        <div class="pane-head"><span>Input</span><span class="status" id="inStatus">&nbsp;</span></div>
+        <textarea id="inputArea" placeholder='{
+  "user": "priya",
+  "role": "admin",
+  "active": true
+}'></textarea>
+      </div>
+      <div class="pane">
+        <div class="pane-head"><span>Output</span><span class="status" id="outStatus">&nbsp;</span></div>
+        <div class="out-scroll"><pre id="outputArea" style="color: var(--text-dim)">Output appears here.</pre></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <div class="meter" id="meter"><b>500</b> / 500 free conversions left today · resets at midnight</div>
+      <div class="btn-group">
+        <button class="ghost" id="copyBtn">Copy output</button>
+        <button class="primary" id="convertBtn">Convert</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="pipeline">
+    <div class="pipeline-label">What actually happens to your input</div>
+    <div class="pipe-strip">
+      <span class="seg active" id="p1">parse</span><span class="join">→</span>
+      <span class="seg" id="p2">validate structure</span><span class="join">→</span>
+      <span class="seg" id="p3">normalize types</span><span class="join">→</span>
+      <span class="seg" id="p4">serialize target</span><span class="join">→</span>
+      <span class="seg" id="p5">idle</span>
+    </div>
+  </section>
+
+  <section class="api-section">
+    <div class="api-grid">
+      <div class="api-copy">
+        <h2>The web tool is the demo. The API is the product.</h2>
+        <p>If you're converting data by hand, this page is free forever. If you're converting data in a pipeline — nightly exports, webhook payloads, ETL jobs — you want this behind an endpoint, not a browser tab. Usage-based pricing, no per-seat nonsense.</p>
+        <div class="tiers">
+          <div class="tier">
+            <div><div class="tier-name">Free</div><div class="tier-desc">For trying it in your codebase</div></div>
+            <div class="tier-price">100 calls/mo</div>
+          </div>
+          <div class="tier featured">
+            <div><div class="tier-name">Build</div><div class="tier-desc">For a live pipeline</div></div>
+            <div class="tier-price">$19/mo · 5,000 calls</div>
+          </div>
+          <div class="tier">
+            <div><div class="tier-name">Scale</div><div class="tier-desc">For production workloads</div></div>
+            <div class="tier-price">$49/mo · 25,000 calls</div>
+          </div>
+          <div class="tier">
+            <div><div class="tier-name">Enterprise</div><div class="tier-desc">Custom volume, SLA, VPC</div></div>
+            <div class="tier-price">Talk to us</div>
+          </div>
+        </div>
+      </div>
+      <div class="code-block">
+        <div class="code-head"><span>request</span><span>POST /v1/convert</span></div>
+        <pre><span class="c">curl https://transpose-api-production.up.railway.app/v1/convert \</span>
+  -H <span class="s">"Authorization: Bearer $KEY"</span> \
+  -H <span class="k">"Content-Type: application/json"</span> \
+  -d <span class="s">'{
+    "from": "csv",
+    "to": "json",
+    "data": "name,age\nPriya,31"
+  }'</span>
+
+<span class="c">→ 200 OK</span>
+<span class="s">{"name":"Priya","age":31}</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Transpose · CSV, JSON, YAML &amp; XML conversion in the browser and over the API.
+  </footer>
+</div>
+
+<script>
+const inputArea = document.getElementById('inputArea');
+const outputArea = document.getElementById('outputArea');
+const fromFormat = document.getElementById('fromFormat');
+const toFormat = document.getElementById('toFormat');
+const inStatus = document.getElementById('inStatus');
+const outStatus = document.getElementById('outStatus');
+const meter = document.getElementById('meter');
+const pipes = ['p1','p2','p3','p4','p5'].map(id => document.getElementById(id));
+
+let remaining = 500;
+const parser = new fxparser.XMLParser({ ignoreAttributes: false });
+const builder = new fxparser.XMLBuilder({ ignoreAttributes: false, format: true });
+
+function csvToObj(text){
+  const lines = text.trim().split(/\r?\n/).filter(l => l.length);
+  if(!lines.length) throw new Error('Empty CSV input');
+  const headers = lines[0].split(',').map(h => h.trim());
+  return lines.slice(1).map(line => {
+    const cells = line.split(',').map(c => c.trim());
+    const row = {};
+    headers.forEach((h,i) => {
+      let v = cells[i];
+      if(v === undefined) v = '';
+      if(v !== '' && !isNaN(v)) v = Number(v);
+      else if(v === 'true') v = true;
+      else if(v === 'false') v = false;
+      row[h] = v;
+    });
+    return row;
+  });
+}
+
+function objToCsv(data){
+  const arr = Array.isArray(data) ? data : [data];
+  if(!arr.length) return '';
+  const headers = Object.keys(arr[0]);
+  const lines = [headers.join(',')];
+  arr.forEach(row => {
+    lines.push(headers.map(h => row[h] === undefined ? '' : String(row[h])).join(','));
+  });
+  return lines.join('\n');
+}
+
+function parseInput(text, fmt){
+  if(fmt === 'json') return JSON.parse(text);
+  if(fmt === 'yaml') return jsyaml.load(text);
+  if(fmt === 'csv') return csvToObj(text);
+  if(fmt === 'xml') return parser.parse(text);
+  throw new Error('Unknown source format');
+}
+
+function serializeOutput(data, fmt){
+  if(fmt === 'json') return JSON.stringify(data, null, 2);
+  if(fmt === 'yaml') return jsyaml.dump(data);
+  if(fmt === 'csv') return objToCsv(data);
+  if(fmt === 'xml') return builder.build(Array.isArray(data) ? { root: { item: data } } : data);
+  throw new Error('Unknown target format');
+}
+
+async function runPipeline(){
+  for(let i = 0; i < pipes.length - 1; i++){
+    pipes.forEach((p,idx) => p.classList.toggle('active', idx === i));
+    await new Promise(r => setTimeout(r, 90));
+  }
+}
+
+document.getElementById('convertBtn').addEventListener('click', async () => {
+  const text = inputArea.value.trim();
+  if(!text){
+    outStatus.textContent = '';
+    outputArea.textContent = 'Nothing to convert yet.';
+    outputArea.style.color = 'var(--text-dim)';
+    return;
+  }
+  if(remaining <= 0){
+    outStatus.textContent = 'limit reached';
+    outStatus.style.color = 'var(--err)';
+    outputArea.textContent = "You've hit today's free limit. This is exactly the moment an API tier earns its keep — see below.";
+    outputArea.style.color = 'var(--err)';
+    return;
+  }
+  try{
+    await runPipeline();
+    const parsed = parseInput(text, fromFormat.value);
+    const result = serializeOutput(parsed, toFormat.value);
+    outputArea.textContent = result;
+    outputArea.style.color = 'var(--text)';
+    outStatus.textContent = 'valid';
+    outStatus.style.color = 'var(--ok)';
+    inStatus.textContent = 'parsed ok';
+    inStatus.style.color = 'var(--ok)';
+    remaining -= 1;
+    meter.innerHTML = `<b>${remaining}</b> / 500 free conversions left today · resets at midnight`;
+    pipes.forEach(p => p.classList.remove('active'));
+    pipes[4].classList.add('active');
+    pipes[4].textContent = 'done';
+  }catch(err){
+    outputArea.textContent = 'Conversion failed: ' + err.message;
+    outputArea.style.color = 'var(--err)';
+    outStatus.textContent = 'error';
+    outStatus.style.color = 'var(--err)';
+    inStatus.textContent = 'invalid';
+    inStatus.style.color = 'var(--err)';
+    pipes.forEach(p => p.classList.remove('active'));
+  }
+});
+
+document.getElementById('swapBtn').addEventListener('click', () => {
+  const f = fromFormat.value;
+  fromFormat.value = toFormat.value;
+  toFormat.value = f;
+});
+
+document.getElementById('copyBtn').addEventListener('click', () => {
+  navigator.clipboard.writeText(outputArea.textContent);
+  const btn = document.getElementById('copyBtn');
+  const orig = btn.textContent;
+  btn.textContent = 'Copied';
+  setTimeout(() => btn.textContent = orig, 1200);
+});
+</script>
+
+</body>
+</html>
