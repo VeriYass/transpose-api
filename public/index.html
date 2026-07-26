@@ -805,7 +805,17 @@ function detectFormat(text){
     try{ JSON.parse(t); return 'json'; }catch(e){}
   }
   if(t[0] === '<' && /^<\?xml|^<[a-zA-Z]/.test(t)) return 'xml';
-  if(/^\[[\w.]+\]\s*$/m.test(t) && /^[\w.-]+\s*=\s*/m.test(t)) return 'toml';
+  // [[array of tables]] is unambiguously TOML — INI has no such construct.
+  if(/^\[\[[\w.-]+\]\]\s*$/m.test(t)) return 'toml';
+  // Plain [section] + key=value is ambiguous between TOML and INI. Only call
+  // it TOML if it actually uses TOML-specific value syntax (quoted strings,
+  // arrays, inline tables, bare booleans) — otherwise INI is the far more
+  // common shape for flat "key=value" content and gets misdetected as TOML
+  // without this check.
+  if(/^\[[\w.-]+\]\s*$/m.test(t) && /^[\w.-]+\s*=\s*/m.test(t)){
+    const looksLikeToml = /=\s*("|'|\[|\{)/m.test(t) || /=\s*(true|false)\s*$/m.test(t);
+    return looksLikeToml ? 'toml' : 'ini';
+  }
   const lines = t.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   const envLike = lines.filter(l => /^[A-Z_][A-Z0-9_]*\s*=/.test(l));
   if(lines.length > 0 && envLike.length / lines.length > 0.8) return 'env';
