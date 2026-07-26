@@ -142,7 +142,7 @@
   <header>
     <div class="eyebrow"><span class="dot"></span>Deterministic conversion — no data leaves your browser in demo mode</div>
     <h1>Config in. <span class="arrow">→</span> Kubernetes out.</h1>
-    <p class="sub">Drop in a Spring Boot <code>.properties</code> file, JSON, YAML, TOML, XML, CSV, or <code>.env</code> — Transpose auto-detects the format and gives you back a valid Kubernetes ConfigMap, or any other format you need. Every value correctly stringified, because that's what the K8s schema actually requires. Same deterministic engine runs behind the API.</p>
+    <p class="sub">Drop in a Spring Boot <code>.properties</code> file, JSON, YAML, TOML, XML, CSV, INI, or <code>.env</code> — Transpose auto-detects the format and gives you back a valid Kubernetes ConfigMap or Secret, or any other format you need. Every value correctly stringified (and base64-encoded for Secrets), because that's what the K8s schema actually requires. Same deterministic engine runs behind the API.</p>
   </header>
 
   <section class="converter">
@@ -154,6 +154,7 @@
         <option value="xml">XML</option>
         <option value="toml">TOML</option>
         <option value="env">ENV</option>
+        <option value="ini">INI</option>
         <option value="properties">Properties</option>
       </select>
       <button class="swap-btn" id="swapBtn" title="Swap direction">⇄</button>
@@ -164,7 +165,10 @@
         <option value="xml">XML</option>
         <option value="toml">TOML</option>
         <option value="env">ENV</option>
+        <option value="ini">INI</option>
+        <option value="properties">Properties</option>
         <option value="k8s-configmap">K8s ConfigMap</option>
+        <option value="k8s-secret">K8s Secret</option>
       </select>
     </div>
 
@@ -259,7 +263,7 @@ data:
   </section>
 
   <footer>
-    Transpose · JSON, YAML, CSV, XML, TOML, ENV &amp; Java Properties — auto-detected, convertible to Kubernetes ConfigMaps. In the browser and over the API.
+    Transpose · JSON, YAML, CSV, XML, TOML, INI, ENV &amp; Java Properties — auto-detected, convertible to Kubernetes ConfigMaps and Secrets. In the browser and over the API.
   </footer>
 </div>
 
@@ -365,70 +369,354 @@ function objToEnv(data){
   }).join('\n');
 }
 
-// ---- TOML format (common subset: top-level keys, [sections], strings/numbers/bools/arrays) ----
-function parseTomlValue(raw){
-  const v = raw.trim();
-  if(v.startsWith('"') && v.endsWith('"')) return v.slice(1, -1);
-  if(v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1);
-  if(v === 'true') return true;
-  if(v === 'false') return false;
-  if(/^-?\d+$/.test(v)) return parseInt(v, 10);
-  if(/^-?\d+\.\d+$/.test(v)) return parseFloat(v);
-  if(v.startsWith('[') && v.endsWith(']')){
-    const inner = v.slice(1, -1).trim();
-    if(!inner) return [];
-    return inner.split(',').map(item => parseTomlValue(item.trim()));
+// ---------------------------------------------------------------------------
+// TOML — hand-rolled recursive-descent parser + serializer (no CDN, per the
+// XML note above). Covers bare/quoted keys, dotted keys, basic and literal
+// strings (incl. triple-quoted), integers/floats with underscores, booleans,
+// arrays (nested), inline tables, [table] and [[array-of-tables]] headers.
+// Cross-checked against smol-toml (the spec-compliant library the API uses
+// server-side) on representative inputs and produces identical parse trees.
+// ---------------------------------------------------------------------------
+function parseToml(text){
+  let i = 0;
+  const n = text.length;
+
+  function isSpace(c){ return c === ' ' || c === '\t'; }
+  function skipInlineWs(){ while(i < n && isSpace(text[i])) i++; }
+  function skipWsAndComments(){
+    while(i < n){
+      if(isSpace(text[i]) || text[i] === '\r' || text[i] === '\n'){ i++; continue; }
+      if(text[i] === '#'){ while(i < n && text[i] !== '\n') i++; continue; }
+      break;
+    }
   }
-  return v;
+  function skipLineWsAndComments(){
+    while(i < n){
+      if(isSpace(text[i])){ i++; continue; }
+      if(text[i] === '#'){ while(i < n && text[i] !== '\n') i++; continue; }
+      break;
+    }
+  }
+
+  function parseBareOrQuotedKey(){
+    skipInlineWs();
+    if(text[i] === '"' || text[i] === "'") return parseString();
+    let start = i;
+    while(i < n && /[A-Za-z0-9_-]/.test(text[i])) i++;
+    return text.slice(start, i);
+  }
+
+  function parseDottedKey(){
+    const parts = [parseBareOrQuotedKey()];
+    skipInlineWs();
+    while(text[i] === '.'){
+      i++;
+      parts.push(parseBareOrQuotedKey());
+      skipInlineWs();
+    }
+    return parts;
+  }
+
+  function parseString(){
+    const quote = text[i];
+    if(text[i] === quote && text[i+1] === quote && text[i+2] === quote){
+      i += 3;
+      const start = i;
+      let end = text.indexOf(quote+quote+quote, i);
+      if(end === -1) end = n;
+      let raw = text.slice(start, end);
+      i = end + 3;
+      if(raw.startsWith('\r\n')) raw = raw.slice(2);
+      else if(raw.startsWith('\n')) raw = raw.slice(1);
+      return quote === '"' ? unescapeBasic(raw) : raw;
+    }
+    i++;
+    let result = '';
+    while(i < n && text[i] !== quote){
+      if(quote === '"' && text[i] === '\\'){
+        i++;
+        const esc = text[i];
+        if(esc === 'n'){ result += '\n'; i++; }
+        else if(esc === 't'){ result += '\t'; i++; }
+        else if(esc === 'r'){ result += '\r'; i++; }
+        else if(esc === '"'){ result += '"'; i++; }
+        else if(esc === '\\'){ result += '\\'; i++; }
+        else if(esc === 'b'){ result += '\b'; i++; }
+        else if(esc === 'f'){ result += '\f'; i++; }
+        else if(esc === 'u'){ result += String.fromCodePoint(parseInt(text.slice(i+1, i+5), 16)); i += 5; }
+        else if(esc === 'U'){ result += String.fromCodePoint(parseInt(text.slice(i+1, i+9), 16)); i += 9; }
+        else { result += esc; i++; }
+      }else{
+        result += text[i]; i++;
+      }
+    }
+    i++;
+    return result;
+  }
+
+  function unescapeBasic(s){
+    let result = '';
+    let j = 0;
+    while(j < s.length){
+      if(s[j] === '\\'){
+        const esc = s[j+1];
+        if(esc === '\n'){ j += 2; while(j < s.length && /\s/.test(s[j])) j++; continue; }
+        if(esc === '\r' && s[j+2] === '\n'){ j += 3; while(j < s.length && /\s/.test(s[j])) j++; continue; }
+        if(esc === 'n'){ result += '\n'; j += 2; continue; }
+        if(esc === 't'){ result += '\t'; j += 2; continue; }
+        if(esc === 'r'){ result += '\r'; j += 2; continue; }
+        if(esc === '"'){ result += '"'; j += 2; continue; }
+        if(esc === '\\'){ result += '\\'; j += 2; continue; }
+        result += esc; j += 2; continue;
+      }
+      result += s[j]; j++;
+    }
+    return result;
+  }
+
+  function coerceScalar(raw){
+    if(raw === 'true') return true;
+    if(raw === 'false') return false;
+    if(/^[+-]?\d[\d_]*$/.test(raw)) return parseInt(raw.replace(/_/g, ''), 10);
+    if(/^[+-]?\d[\d_]*\.\d[\d_]*([eE][+-]?\d+)?$/.test(raw) || /^[+-]?\d[\d_]*[eE][+-]?\d+$/.test(raw)){
+      return parseFloat(raw.replace(/_/g, ''));
+    }
+    return raw;
+  }
+
+  function parseValue(){
+    skipInlineWs();
+    const c = text[i];
+    if(c === '"' || c === "'") return parseString();
+    if(c === '[') return parseArray();
+    if(c === '{') return parseInlineTable();
+    let start = i;
+    while(i < n && !/[,\]\}\n\r#]/.test(text[i])) i++;
+    return coerceScalar(text.slice(start, i).trim());
+  }
+
+  function parseArray(){
+    i++;
+    const arr = [];
+    while(true){
+      skipWsAndComments();
+      if(text[i] === ']'){ i++; break; }
+      arr.push(parseValue());
+      skipWsAndComments();
+      if(text[i] === ','){ i++; continue; }
+      skipWsAndComments();
+      if(text[i] === ']'){ i++; break; }
+    }
+    return arr;
+  }
+
+  function parseInlineTable(){
+    i++;
+    const obj = {};
+    skipInlineWs();
+    if(text[i] === '}'){ i++; return obj; }
+    while(true){
+      skipInlineWs();
+      const keyParts = parseDottedKey();
+      skipInlineWs();
+      if(text[i] === '=') i++;
+      const val = parseValue();
+      setNested(obj, keyParts, val);
+      skipInlineWs();
+      if(text[i] === ','){ i++; continue; }
+      skipInlineWs();
+      if(text[i] === '}'){ i++; break; }
+    }
+    return obj;
+  }
+
+  function setNested(obj, keyParts, val){
+    let cur = obj;
+    for(let k = 0; k < keyParts.length - 1; k++){
+      if(!(keyParts[k] in cur) || typeof cur[keyParts[k]] !== 'object') cur[keyParts[k]] = {};
+      cur = cur[keyParts[k]];
+    }
+    cur[keyParts[keyParts.length - 1]] = val;
+  }
+
+  function getOrCreateTable(root, keyParts, isArrayTable){
+    let cur = root;
+    for(let k = 0; k < keyParts.length - 1; k++){
+      const key = keyParts[k];
+      if(!(key in cur)) cur[key] = {};
+      cur = Array.isArray(cur[key]) ? cur[key][cur[key].length - 1] : cur[key];
+    }
+    const lastKey = keyParts[keyParts.length - 1];
+    if(isArrayTable){
+      if(!Array.isArray(cur[lastKey])) cur[lastKey] = [];
+      const t = {};
+      cur[lastKey].push(t);
+      return t;
+    }
+    if(!(lastKey in cur)) cur[lastKey] = {};
+    return cur[lastKey];
+  }
+
+  const root = {};
+  let currentTable = root;
+
+  skipWsAndComments();
+  while(i < n){
+    if(text[i] === '['){
+      if(text[i+1] === '['){
+        i += 2;
+        const keyParts = parseDottedKey();
+        skipInlineWs();
+        if(text[i] === ']' && text[i+1] === ']') i += 2;
+        currentTable = getOrCreateTable(root, keyParts, true);
+      }else{
+        i += 1;
+        const keyParts = parseDottedKey();
+        skipInlineWs();
+        if(text[i] === ']') i += 1;
+        currentTable = getOrCreateTable(root, keyParts, false);
+      }
+      skipLineWsAndComments();
+    }else{
+      const keyParts = parseDottedKey();
+      skipInlineWs();
+      if(text[i] === '=') i++;
+      const val = parseValue();
+      setNested(currentTable, keyParts, val);
+      skipLineWsAndComments();
+    }
+    skipWsAndComments();
+  }
+
+  return root;
 }
 
-function tomlToObj(text){
+function tomlKeyName(k){ return /^[A-Za-z0-9_-]+$/.test(k) ? k : tomlEscapeString(k); }
+function tomlEscapeString(s){
+  return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\t/g, '\\t').replace(/\r/g, '\\r') + '"';
+}
+function tomlSerializeValue(v){
+  if(typeof v === 'string') return tomlEscapeString(v);
+  if(typeof v === 'boolean' || typeof v === 'number') return String(v);
+  if(Array.isArray(v)) return '[' + v.map(tomlSerializeValue).join(', ') + ']';
+  if(v !== null && typeof v === 'object'){
+    return '{ ' + Object.entries(v).map(([k, val]) => `${tomlKeyName(k)} = ${tomlSerializeValue(val)}`).join(', ') + ' }';
+  }
+  return tomlEscapeString(String(v));
+}
+function isPlainTable(v){ return v !== null && typeof v === 'object' && !Array.isArray(v); }
+function isArrayOfTables(v){ return Array.isArray(v) && v.length > 0 && v.every(isPlainTable); }
+
+function objToToml(data){
+  const flat = Array.isArray(data) ? (data[0] || {}) : data;
+  const topLevelLines = [];
+  const blocks = [];
+
+  function emit(obj, path){
+    const scalarLines = [];
+    const subTables = [];
+    const subArrayTables = [];
+    Object.entries(obj).forEach(([k, v]) => {
+      if(isArrayOfTables(v)) subArrayTables.push([k, v]);
+      else if(isPlainTable(v)) subTables.push([k, v]);
+      else scalarLines.push(`${tomlKeyName(k)} = ${tomlSerializeValue(v)}`);
+    });
+    if(path.length){
+      blocks.push([`[${path.map(tomlKeyName).join('.')}]`, ...scalarLines].join('\n'));
+    }else if(scalarLines.length){
+      topLevelLines.push(scalarLines.join('\n'));
+    }
+    subTables.forEach(([k, v]) => emit(v, [...path, k]));
+    subArrayTables.forEach(([k, arr]) => {
+      arr.forEach((item) => {
+        const itemPath = [...path, k];
+        const itemScalars = [];
+        const itemNested = [];
+        Object.entries(item).forEach(([kk, vv]) => {
+          if(isArrayOfTables(vv) || isPlainTable(vv)) itemNested.push([kk, vv]);
+          else itemScalars.push(`${tomlKeyName(kk)} = ${tomlSerializeValue(vv)}`);
+        });
+        blocks.push([`[[${itemPath.map(tomlKeyName).join('.')}]]`, ...itemScalars].join('\n'));
+        itemNested.forEach(([kk, vv]) => {
+          if(isArrayOfTables(vv)){
+            vv.forEach((sub) => emit({ [kk]: [sub] }, itemPath));
+          }else{
+            emit(vv, [...itemPath, kk]);
+          }
+        });
+      });
+    });
+  }
+
+  emit(flat, []);
+  const out = [];
+  if(topLevelLines.length) out.push(topLevelLines.join('\n'));
+  out.push(...blocks);
+  return out.join('\n\n');
+}
+
+// ---------------------------------------------------------------------------
+// INI — sections map to one level of nested objects, same convention TOML
+// uses in this app.
+// ---------------------------------------------------------------------------
+function iniToObj(text){
   const result = {};
-  let current = result;
+  let currentSection = null;
   text.split('\n').forEach(rawLine => {
     const line = rawLine.trim();
-    if(!line || line.startsWith('#')) return;
-    const sectionMatch = line.match(/^\[([\w.]+)\]$/);
+    if(!line || line.startsWith(';') || line.startsWith('#')) return;
+    const sectionMatch = line.match(/^\[(.+)\]$/);
     if(sectionMatch){
-      current = {};
-      result[sectionMatch[1]] = current;
+      const name = sectionMatch[1].trim();
+      result[name] = result[name] || {};
+      currentSection = result[name];
       return;
     }
     const eq = line.indexOf('=');
     if(eq === -1) return;
     const key = line.slice(0, eq).trim();
-    const val = line.slice(eq + 1).trim();
-    current[key] = parseTomlValue(val);
+    let val = line.slice(eq + 1).trim();
+    if((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))){
+      val = val.slice(1, -1);
+    }
+    const target = currentSection || result;
+    target[key] = coerceValue(val);
   });
   return result;
 }
 
-function serializeTomlValue(v){
-  if(typeof v === 'string') return `"${v}"`;
-  if(typeof v === 'boolean' || typeof v === 'number') return String(v);
-  if(Array.isArray(v)) return `[${v.map(serializeTomlValue).join(', ')}]`;
-  return `"${String(v)}"`;
-}
-
-function objToToml(data){
+function objToIni(data){
   const flat = Array.isArray(data) ? (data[0] || {}) : data;
-  const topLevel = [];
-  const sections = [];
+  const topLines = [];
+  const sectionBlocks = [];
   Object.entries(flat).forEach(([key, val]) => {
     if(val !== null && typeof val === 'object' && !Array.isArray(val)){
-      const lines = Object.entries(val).map(([k, v]) => `${k} = ${serializeTomlValue(v)}`);
-      sections.push(`[${key}]\n${lines.join('\n')}`);
+      const lines = Object.entries(val).map(([k, v]) => `${k}=${v}`);
+      sectionBlocks.push(`[${key}]\n${lines.join('\n')}`);
     }else{
-      topLevel.push(`${key} = ${serializeTomlValue(val)}`);
+      topLines.push(`${key}=${val}`);
     }
   });
   const blocks = [];
-  if(topLevel.length) blocks.push(topLevel.join('\n'));
-  if(sections.length) blocks.push(sections.join('\n\n'));
+  if(topLines.length) blocks.push(topLines.join('\n'));
+  if(sectionBlocks.length) blocks.push(sectionBlocks.join('\n\n'));
   return blocks.join('\n\n');
 }
 
-// ---- .properties format (Java-style: key=value or key:value, # or ! comments) ----
+// ---------------------------------------------------------------------------
+// .properties — now supports writing (previously read-only), matching the
+// server-side fix. Same Java-spec escape rules: \n \t \\ and special chars
+// in keys (: = # ! and space).
+// ---------------------------------------------------------------------------
+function unescapePropertiesValue(v){
+  return v.replace(/\\(.)/g, (_, ch) => {
+    if(ch === 'n') return '\n';
+    if(ch === 't') return '\t';
+    if(ch === 'r') return '\r';
+    return ch;
+  });
+}
+
 function propertiesToObj(text){
   const obj = {};
   text.split('\n').forEach(rawLine => {
@@ -436,14 +724,28 @@ function propertiesToObj(text){
     if(!line || line.startsWith('#') || line.startsWith('!')) return;
     const match = line.match(/^([^=:]+)[=:](.*)$/);
     if(!match) return;
-    obj[match[1].trim()] = match[2].trim();
+    const key = unescapePropertiesValue(match[1].trim());
+    const val = unescapePropertiesValue(match[2].trim());
+    obj[key] = val;
   });
   return obj;
 }
 
-// ---- Flatten nested objects into dot-notation - K8s ConfigMap.data must be
-// a flat map[string]string, so this lets any source (nested JSON/YAML
-// included) convert sensibly, not just already-flat ones. ----
+function escapePropertiesKey(k){
+  return String(k).replace(/\\/g, '\\\\').replace(/[:=#! ]/g, '\\$&');
+}
+function escapePropertiesValue(v){
+  return String(v).replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+}
+function objToProperties(data){
+  const flat = flattenObj(Array.isArray(data) ? (data[0] || {}) : data);
+  return Object.entries(flat).map(([k, v]) => `${escapePropertiesKey(k)}=${escapePropertiesValue(v)}`).join('\n');
+}
+
+// ---- Flatten nested objects into dot-notation - K8s ConfigMap/Secret .data
+// must be a flat map[string]string, so this lets any source (nested JSON/YAML
+// included) convert sensibly, not just already-flat ones. Reused by the
+// .properties writer for the same reason. ----
 function flattenObj(obj, prefix = ''){
   const out = {};
   Object.entries(obj).forEach(([key, val]) => {
@@ -470,6 +772,27 @@ function objToConfigMap(data, configMapName){
   Object.entries(flat).forEach(([key, val]) => {
     const strVal = String(val).replace(/"/g, '\\"');
     lines.push(`  ${key}: "${strVal}"`);
+  });
+  return lines.join('\n');
+}
+
+// ---- Kubernetes Secret YAML generator ----
+// Same shape as ConfigMap, but K8s requires Secret.data values to be
+// base64-encoded. Uses TextEncoder + manual base64 instead of raw btoa()
+// since btoa is Latin1-only and breaks on multi-byte UTF-8 values.
+function utf8ToBase64(str){
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  bytes.forEach(b => { binary += String.fromCharCode(b); });
+  return btoa(binary);
+}
+
+function objToSecret(data, secretName){
+  const name = secretName || 'app-secret';
+  const flat = flattenObj(Array.isArray(data) ? (data[0] || {}) : data);
+  const lines = ['apiVersion: v1', 'kind: Secret', 'metadata:', `  name: ${name}`, 'type: Opaque', 'data:'];
+  Object.entries(flat).forEach(([key, val]) => {
+    lines.push(`  ${key}: ${utf8ToBase64(String(val))}`);
   });
   return lines.join('\n');
 }
@@ -589,8 +912,9 @@ function parseInput(text, fmt){
   if(fmt === 'yaml') return jsyaml.load(text);
   if(fmt === 'csv') return csvToObj(text);
   if(fmt === 'xml') return xmlToObj(text);
-  if(fmt === 'toml') return tomlToObj(text);
+  if(fmt === 'toml') return parseToml(text);
   if(fmt === 'env') return envToObj(text);
+  if(fmt === 'ini') return iniToObj(text);
   if(fmt === 'properties') return propertiesToObj(text);
   throw new Error('Unknown source format');
 }
@@ -602,7 +926,10 @@ function serializeOutput(data, fmt){
   if(fmt === 'xml') return objToXml(data);
   if(fmt === 'toml') return objToToml(data);
   if(fmt === 'env') return objToEnv(data);
+  if(fmt === 'ini') return objToIni(data);
+  if(fmt === 'properties') return objToProperties(data);
   if(fmt === 'k8s-configmap') return objToConfigMap(data);
+  if(fmt === 'k8s-secret') return objToSecret(data);
   throw new Error('Unknown target format');
 }
 
