@@ -246,18 +246,20 @@
   -H <span class="s">"Authorization: Bearer $KEY"</span> \
   -H <span class="k">"Content-Type: application/json"</span> \
   -d <span class="s">'{
-    "from": "properties",
-    "to": "k8s-configmap",
-    "data": "server.port=8080"
+    "from": "env",
+    "to": "k8s-secret",
+    "data": "DB_PASSWORD=hunter2"
   }'</span>
 
 <span class="c">→ 200 OK</span>
 <span class="s">apiVersion: v1
-kind: ConfigMap
+kind: Secret
 metadata:
-  name: app-config
+  name: app-secret
+type: Opaque
 data:
-  server.port: "8080"</span></pre>
+  DB_PASSWORD: aHVudGVyMg==</span></pre>
+        <div style="padding:9px 14px;border-top:1px solid var(--border);font-size:11px;color:var(--text-dim);font-family:var(--sans)">Also does JSON/YAML/TOML/INI/CSV/XML/ENV/Properties → K8s ConfigMap, and any format → any format.</div>
       </div>
     </div>
   </section>
