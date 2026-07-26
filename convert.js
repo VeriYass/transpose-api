@@ -1,8 +1,11 @@
 // convert.js
-// Core conversion logic: CSV / JSON / YAML / XML / TOML / ENV, in any direction.
+// Core conversion logic: CSV / JSON / YAML / XML / TOML / ENV / INI / properties,
+// plus Kubernetes ConfigMap and Secret generation, in any direction.
 
 const yaml = require('js-yaml');
 const { XMLParser, XMLBuilder } = require('fast-xml-parser');
+const TOML = require('smol-toml');
+const ini = require('ini');
 
 const xmlParser = new XMLParser({ ignoreAttributes: false });
 const xmlBuilder = new XMLBuilder({ ignoreAttributes: false, format: true });
@@ -124,70 +127,58 @@ function objToEnv(data) {
     .join('\n');
 }
 
-// ---- TOML format (common subset: top-level keys, [sections], strings/numbers/bools/arrays) ----
-function parseTomlValue(raw) {
-  const v = raw.trim();
-  if (v.startsWith('"') && v.endsWith('"')) return v.slice(1, -1);
-  if (v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1);
-  if (v === 'true') return true;
-  if (v === 'false') return false;
-  if (/^-?\d+$/.test(v)) return parseInt(v, 10);
-  if (/^-?\d+\.\d+$/.test(v)) return parseFloat(v);
-  if (v.startsWith('[') && v.endsWith(']')) {
-    const inner = v.slice(1, -1).trim();
-    if (!inner) return [];
-    return inner.split(',').map((item) => parseTomlValue(item.trim()));
-  }
-  return v;
-}
-
+// ---- TOML format ----
+// Backed by smol-toml (full TOML 1.0 spec: nested/inline tables, arrays of
+// tables, dates, multiline strings) instead of a hand-rolled "common subset"
+// parser, which previously silently mishandled anything beyond flat
+// key=value + single-level [section] blocks.
 function tomlToObj(text) {
-  const result = {};
-  let current = result;
-  text.split('\n').forEach((rawLine) => {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) return;
-    const sectionMatch = line.match(/^\[([\w.]+)\]$/);
-    if (sectionMatch) {
-      current = {};
-      result[sectionMatch[1]] = current;
-      return;
-    }
-    const eq = line.indexOf('=');
-    if (eq === -1) return;
-    const key = line.slice(0, eq).trim();
-    const val = line.slice(eq + 1).trim();
-    current[key] = parseTomlValue(val);
-  });
-  return result;
-}
-
-function serializeTomlValue(v) {
-  if (typeof v === 'string') return `"${v}"`;
-  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
-  if (Array.isArray(v)) return `[${v.map(serializeTomlValue).join(', ')}]`;
-  return `"${String(v)}"`;
+  return TOML.parse(text);
 }
 
 function objToToml(data) {
   const flat = Array.isArray(data) ? data[0] || {} : data;
-  const topLevel = [];
-  const sections = [];
-  Object.entries(flat).forEach(([key, val]) => {
-    if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
-      const lines = Object.entries(val).map(([k, v]) => `${k} = ${serializeTomlValue(v)}`);
-      sections.push(`[${key}]\n${lines.join('\n')}`);
-    } else {
-      topLevel.push(`${key} = ${serializeTomlValue(val)}`);
-    }
-  });
-  const blocks = [];
-  if (topLevel.length) blocks.push(topLevel.join('\n'));
-  if (sections.length) blocks.push(sections.join('\n\n'));
-  return blocks.join('\n\n');
+  return TOML.stringify(flat);
+}
+
+// ---- INI format ----
+// Sections map to one level of nested objects, same convention TOML uses.
+// INI has no native types, so values round-trip as strings unless coerced.
+function iniToObj(text) {
+  const parsed = ini.parse(text);
+  const coerceDeep = (obj) => {
+    const out = {};
+    Object.entries(obj).forEach(([k, v]) => {
+      if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+        out[k] = coerceDeep(v);
+      } else if (typeof v === 'string') {
+        out[k] = coerceValue(v);
+      } else {
+        out[k] = v;
+      }
+    });
+    return out;
+  };
+  return coerceDeep(parsed);
+}
+
+function objToIni(data) {
+  const flat = Array.isArray(data) ? data[0] || {} : data;
+  return ini.stringify(flat);
 }
 
 // ---- .properties format (Java-style: key=value or key:value, # or ! comments) ----
+// Supports the backslash escapes the Java spec defines for values (\n \t \\)
+// so round trips through JSON/YAML don't corrupt multi-line or tabbed values.
+function unescapePropertiesValue(v) {
+  return v.replace(/\\(.)/g, (_, ch) => {
+    if (ch === 'n') return '\n';
+    if (ch === 't') return '\t';
+    if (ch === 'r') return '\r';
+    return ch; // \\  \:  \=  \#  \!  \space -> literal char
+  });
+}
+
 function propertiesToObj(text) {
   const obj = {};
   text.split('\n').forEach((rawLine) => {
@@ -195,16 +186,39 @@ function propertiesToObj(text) {
     if (!line || line.startsWith('#') || line.startsWith('!')) return;
     const match = line.match(/^([^=:]+)[=:](.*)$/);
     if (!match) return;
-    const key = match[1].trim();
-    const val = match[2].trim();
+    const key = unescapePropertiesValue(match[1].trim());
+    const val = unescapePropertiesValue(match[2].trim());
     obj[key] = val;
   });
   return obj;
 }
 
+function escapePropertiesKey(k) {
+  return String(k).replace(/\\/g, '\\\\').replace(/[:=#! ]/g, '\\$&');
+}
+
+function escapePropertiesValue(v) {
+  return String(v)
+    .replace(/\\/g, '\\\\')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+}
+
+// Nested objects are flattened to dot-notation keys, same convention used
+// for K8s ConfigMap generation, so JSON/YAML sources with nested structure
+// produce sensible .properties output instead of "[object Object]".
+function objToProperties(data) {
+  const flat = flattenObj(Array.isArray(data) ? data[0] || {} : data);
+  return Object.entries(flat)
+    .map(([k, v]) => `${escapePropertiesKey(k)}=${escapePropertiesValue(v)}`)
+    .join('\n');
+}
+
 // ---- Flatten nested objects into dot-notation - K8s ConfigMap.data must be
 // a flat map[string]string, so this lets any source format (nested JSON/YAML
-// included) convert sensibly, not just already-flat ones. ----
+// included) convert sensibly, not just already-flat ones. Reused by the
+// .properties writer for the same reason. ----
 function flattenObj(obj, prefix = '') {
   const out = {};
   Object.entries(obj).forEach(([key, val]) => {
@@ -236,6 +250,22 @@ function objToConfigMap(data, configMapName) {
   return lines.join('\n');
 }
 
+// ---- Kubernetes Secret YAML generator ----
+// Same shape as ConfigMap, but the K8s API requires Secret.data values to be
+// base64-encoded strings (kind: Secret, type: Opaque). This is the natural
+// companion to ConfigMap generation — anything that looks like a credential
+// (.env files, API keys) should go here instead of a plaintext ConfigMap.
+function objToSecret(data, secretName) {
+  const name = secretName || 'app-secret';
+  const flat = flattenObj(Array.isArray(data) ? (data[0] || {}) : data);
+  const lines = ['apiVersion: v1', 'kind: Secret', 'metadata:', `  name: ${name}`, 'type: Opaque', 'data:'];
+  Object.entries(flat).forEach(([key, val]) => {
+    const b64 = Buffer.from(String(val), 'utf8').toString('base64');
+    lines.push(`  ${key}: ${b64}`);
+  });
+  return lines.join('\n');
+}
+
 function parseInput(text, fmt) {
   switch (fmt) {
     case 'json':
@@ -250,6 +280,8 @@ function parseInput(text, fmt) {
       return tomlToObj(text);
     case 'env':
       return envToObj(text);
+    case 'ini':
+      return iniToObj(text);
     case 'properties':
       return propertiesToObj(text);
     default:
@@ -271,17 +303,23 @@ function serializeOutput(data, fmt, fmtOptions = {}) {
       return objToToml(data);
     case 'env':
       return objToEnv(data);
+    case 'ini':
+      return objToIni(data);
+    case 'properties':
+      return objToProperties(data);
     case 'k8s-configmap':
       return objToConfigMap(data, fmtOptions.name);
+    case 'k8s-secret':
+      return objToSecret(data, fmtOptions.name);
     default:
       throw new Error(`Unsupported target format: ${fmt}`);
   }
 }
 
 // Formats that can be parsed as INPUT.
-const SUPPORTED_FORMATS = ['json', 'yaml', 'csv', 'xml', 'toml', 'env', 'properties'];
-// k8s-configmap is generation-only: valid as a target, never as a source.
-const OUTPUT_ONLY_FORMATS = ['k8s-configmap'];
+const SUPPORTED_FORMATS = ['json', 'yaml', 'csv', 'xml', 'toml', 'env', 'ini', 'properties'];
+// k8s-configmap / k8s-secret are generation-only: valid as a target, never as a source.
+const OUTPUT_ONLY_FORMATS = ['k8s-configmap', 'k8s-secret'];
 const ALL_OUTPUT_FORMATS = [...SUPPORTED_FORMATS, ...OUTPUT_ONLY_FORMATS];
 
 function convert(text, from, to, options = {}) {
