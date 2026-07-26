@@ -7,32 +7,90 @@ const { XMLParser, XMLBuilder } = require('fast-xml-parser');
 const xmlParser = new XMLParser({ ignoreAttributes: false });
 const xmlBuilder = new XMLBuilder({ ignoreAttributes: false, format: true });
 
+// CSV handling per RFC 4180. A naive split(',') silently corrupts any field
+// containing a comma, quote, or newline — the worst kind of failure, since it
+// produces plausible-looking wrong output rather than an error.
+function parseCsvRows(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let fieldWasQuoted = false;
+  let inQuotes = false;
+  let i = 0;
+
+  function endField() {
+    // Whitespace inside quotes is significant; outside it usually isn't.
+    row.push(fieldWasQuoted ? field : field.trim());
+    field = '';
+    fieldWasQuoted = false;
+  }
+  function endRow() {
+    endField();
+    rows.push(row);
+    row = [];
+  }
+
+  while (i < text.length) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        inQuotes = false; i++; continue;
+      }
+      field += ch; i++; continue;
+    }
+    if (ch === '"') { inQuotes = true; fieldWasQuoted = true; i++; continue; }
+    if (ch === ',') { endField(); i++; continue; }
+    if (ch === '\r') { if (text[i + 1] === '\n') i++; endRow(); i++; continue; }
+    if (ch === '\n') { endRow(); i++; continue; }
+    field += ch; i++;
+  }
+  if (field !== '' || fieldWasQuoted || row.length > 0) endRow();
+  return rows;
+}
+
+function coerceValue(v) {
+  if (v === '') return '';
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  // Preserve as string: leading zeros (zip codes, IDs like 007), leading +,
+  // and integers long enough to lose precision as JS numbers.
+  if (/^\+/.test(v)) return v;
+  if (/^-?0\d/.test(v)) return v;
+  if (/^-?\d{16,}$/.test(v)) return v;
+  if (!isNaN(v) && !isNaN(parseFloat(v))) return Number(v);
+  return v;
+}
+
 function csvToObj(text) {
-  const lines = text.trim().split(/\r?\n/).filter((l) => l.length);
-  if (!lines.length) throw new Error('Empty CSV input');
-  const headers = lines[0].split(',').map((h) => h.trim());
-  return lines.slice(1).map((line) => {
-    const cells = line.split(',').map((c) => c.trim());
-    const row = {};
-    headers.forEach((h, i) => {
-      let v = cells[i];
-      if (v === undefined) v = '';
-      if (v !== '' && !isNaN(v)) v = Number(v);
-      else if (v === 'true') v = true;
-      else if (v === 'false') v = false;
-      row[h] = v;
+  const rows = parseCsvRows(text);
+  if (!rows.length) throw new Error('Empty CSV input');
+  const headers = rows[0];
+  return rows.slice(1).map((cells) => {
+    const obj = {};
+    headers.forEach((h, idx) => {
+      obj[h] = coerceValue(cells[idx] === undefined ? '' : cells[idx]);
     });
-    return row;
+    return obj;
   });
+}
+
+function escapeCsvField(v) {
+  const s = v === null || v === undefined ? '' : String(v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
 function objToCsv(data) {
   const arr = Array.isArray(data) ? data : [data];
   if (!arr.length) return '';
-  const headers = Object.keys(arr[0]);
-  const lines = [headers.join(',')];
+  // Union of all keys, not just the first row's — later rows may add fields.
+  const headers = [];
   arr.forEach((row) => {
-    lines.push(headers.map((h) => (row[h] === undefined ? '' : String(row[h]))).join(','));
+    Object.keys(row || {}).forEach((k) => { if (!headers.includes(k)) headers.push(k); });
+  });
+  const lines = [headers.map(escapeCsvField).join(',')];
+  arr.forEach((row) => {
+    lines.push(headers.map((h) => escapeCsvField(row ? row[h] : '')).join(','));
   });
   return lines.join('\n');
 }
