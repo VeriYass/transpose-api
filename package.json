@@ -4,7 +4,8 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node test-convert.js && node test-db.js"
   },
   "keywords": [],
   "author": "",
@@ -17,7 +18,11 @@
     "ini": "^7.0.0",
     "js-yaml": "^5.2.2",
     "nanoid": "^3.3.16",
+    "pg": "^8.22.0",
     "smol-toml": "^1.7.1",
     "stripe": "^22.3.2"
+  },
+  "devDependencies": {
+    "pg-mem": "^3.0.14"
   }
 }

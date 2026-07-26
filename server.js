@@ -36,18 +36,20 @@ app.post(
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
+    // We respond to Stripe immediately (res.json below) rather than waiting
+    // on these DB writes to finish — Stripe expects a fast ack and will
+    // retry on timeout. Errors are logged, not surfaced to the webhook caller.
     switch (event.type) {
       case 'checkout.session.completed': {
         const session = event.data.object;
         const stripeCustomerId = session.customer;
-        // Fetch the subscription to know which price/plan was purchased.
         stripe.subscriptions
           .retrieve(session.subscription)
-          .then((sub) => {
+          .then(async (sub) => {
             const priceId = sub.items.data[0].price.id;
             const plan = planForPriceId(priceId) || 'build';
 
-            db.upsertCustomer(stripeCustomerId, {
+            await db.upsertCustomer(stripeCustomerId, {
               email: session.customer_details?.email,
               plan,
               subscriptionId: sub.id,
@@ -56,7 +58,7 @@ app.post(
 
             // Issue a fresh API key for this customer.
             const apiKey = `tp_live_${nanoid(32)}`;
-            db.createApiKey(apiKey, stripeCustomerId, plan);
+            await db.createApiKey(apiKey, stripeCustomerId, plan);
 
             // In production: email this key to the customer (Postmark/Resend/etc)
             // instead of only logging it.
@@ -71,17 +73,21 @@ app.post(
         const priceId = sub.items.data[0].price.id;
         const plan = planForPriceId(priceId);
         if (plan) {
-          db.updatePlanForCustomer(sub.customer, plan);
-          console.log(`🔄 Customer ${sub.customer} moved to plan: ${plan}`);
+          db.updatePlanForCustomer(sub.customer, plan)
+            .then(() => console.log(`🔄 Customer ${sub.customer} moved to plan: ${plan}`))
+            .catch((err) => console.error('Failed to update plan:', err));
         }
         break;
       }
 
       case 'customer.subscription.deleted': {
         const sub = event.data.object;
-        db.revokeApiKeysForCustomer(sub.customer);
-        db.upsertCustomer(sub.customer, { status: 'canceled' });
-        console.log(`🛑 Subscription canceled, API keys revoked for ${sub.customer}`);
+        Promise.all([
+          db.revokeApiKeysForCustomer(sub.customer),
+          db.upsertCustomer(sub.customer, { status: 'canceled' }),
+        ])
+          .then(() => console.log(`🛑 Subscription canceled, API keys revoked for ${sub.customer}`))
+          .catch((err) => console.error('Failed to process cancellation:', err));
         break;
       }
 
@@ -115,7 +121,7 @@ app.use(express.static('public', { extensions: ['html'] }));
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 // ---- Conversion endpoint (the actual product) ----
-app.post('/v1/convert', requireApiKey, (req, res) => {
+app.post('/v1/convert', requireApiKey, async (req, res) => {
   const { from, to, data } = req.body || {};
 
   if (!from || !to || data === undefined) {
@@ -128,7 +134,7 @@ app.post('/v1/convert', requireApiKey, (req, res) => {
 
   try {
     const result = convert(String(data), from, to);
-    const used = db.recordUsage(req.apiKey);
+    const used = await db.recordUsage(req.apiKey);
     res.json({
       result,
       usage: { used, limit: req.planLimit, plan: req.plan },
@@ -140,17 +146,22 @@ app.post('/v1/convert', requireApiKey, (req, res) => {
 
 // ---- Free tier signup: no payment, just issue a capped key ----
 // Wire this to a real email-capture form. Kept deliberately simple here.
-app.post('/api/signup-free', (req, res) => {
+app.post('/api/signup-free', async (req, res) => {
   const { email } = req.body || {};
   if (!email) return res.status(400).json({ error: 'email_required' });
 
-  const fakeCustomerId = `free_${nanoid(16)}`;
-  const apiKey = `tp_free_${nanoid(32)}`;
+  try {
+    const fakeCustomerId = `free_${nanoid(16)}`;
+    const apiKey = `tp_free_${nanoid(32)}`;
 
-  db.upsertCustomer(fakeCustomerId, { email, plan: 'free', status: 'active' });
-  db.createApiKey(apiKey, fakeCustomerId, 'free');
+    await db.upsertCustomer(fakeCustomerId, { email, plan: 'free', status: 'active' });
+    await db.createApiKey(apiKey, fakeCustomerId, 'free');
 
-  res.json({ apiKey, plan: 'free', monthlyLimit: PLANS.free.monthlyLimit });
+    res.json({ apiKey, plan: 'free', monthlyLimit: PLANS.free.monthlyLimit });
+  } catch (err) {
+    console.error('signup-free failed:', err.message);
+    res.status(500).json({ error: 'signup_failed', message: err.message });
+  }
 });
 
 // ---- Paid tier signup: create a Stripe Checkout session ----
@@ -193,7 +204,7 @@ app.get('/api/key-for-session', async (req, res) => {
     if (session.payment_status !== 'paid') {
       return res.status(402).json({ error: 'not_paid' });
     }
-    const apiKey = db.getApiKeyByCustomer(session.customer);
+    const apiKey = await db.getApiKeyByCustomer(session.customer);
     if (!apiKey) {
       // Webhook may not have processed yet; client will retry.
       return res.status(202).json({ status: 'pending' });
@@ -210,6 +221,21 @@ app.get('/api/usage', requireApiKey, (req, res) => {
   res.json({ plan: req.plan, used: req.usedThisMonth, limit: req.planLimit });
 });
 
-app.listen(PORT, () => {
-  console.log(`Transpose API running on http://localhost:${PORT}`);
+// ---------------------------------------------------------------------------
+// Boot: schema must exist before we accept traffic. If Postgres is
+// unreachable or DATABASE_URL is missing, this throws/rejects and the
+// process exits rather than serving requests against a broken store.
+// ---------------------------------------------------------------------------
+async function start() {
+  await db.initSchema();
+  app.listen(PORT, () => {
+    console.log(`Transpose API running on http://localhost:${PORT}`);
+  });
+}
+
+start().catch((err) => {
+  console.error('FATAL: failed to start server:', err.message);
+  process.exit(1);
 });
+
+module.exports = app;
