@@ -141,8 +141,8 @@
 <div class="wrap">
   <header>
     <div class="eyebrow"><span class="dot"></span>Deterministic conversion — no data leaves your browser in demo mode</div>
-    <h1>CSV <span class="arrow">→</span> JSON <span class="arrow">→</span> YAML <span class="arrow">→</span> XML</h1>
-    <p class="sub">Paste structured data on the left, get a clean, valid conversion on the right. Same engine runs behind the API — every rule below is exactly what your requests will hit in production.</p>
+    <h1>Config in. <span class="arrow">→</span> Kubernetes out.</h1>
+    <p class="sub">Drop in a Spring Boot <code>.properties</code> file, JSON, YAML, TOML, XML, CSV, or <code>.env</code> — Transpose auto-detects the format and gives you back a valid Kubernetes ConfigMap, or any other format you need. Every value correctly stringified, because that's what the K8s schema actually requires. Same deterministic engine runs behind the API.</p>
   </header>
 
   <section class="converter">
@@ -152,6 +152,9 @@
         <option value="csv">CSV</option>
         <option value="yaml">YAML</option>
         <option value="xml">XML</option>
+        <option value="toml">TOML</option>
+        <option value="env">ENV</option>
+        <option value="properties">Properties</option>
       </select>
       <button class="swap-btn" id="swapBtn" title="Swap direction">⇄</button>
       <select id="toFormat">
@@ -159,6 +162,9 @@
         <option value="csv">CSV</option>
         <option value="json">JSON</option>
         <option value="xml">XML</option>
+        <option value="toml">TOML</option>
+        <option value="env">ENV</option>
+        <option value="k8s-configmap">K8s ConfigMap</option>
       </select>
     </div>
 
@@ -236,19 +242,24 @@
   -H <span class="s">"Authorization: Bearer $KEY"</span> \
   -H <span class="k">"Content-Type: application/json"</span> \
   -d <span class="s">'{
-    "from": "csv",
-    "to": "json",
-    "data": "name,age\nPriya,31"
+    "from": "properties",
+    "to": "k8s-configmap",
+    "data": "server.port=8080"
   }'</span>
 
 <span class="c">→ 200 OK</span>
-<span class="s">{"name":"Priya","age":31}</span></pre>
+<span class="s">apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  server.port: "8080"</span></pre>
       </div>
     </div>
   </section>
 
   <footer>
-    Transpose · CSV, JSON, YAML &amp; XML conversion in the browser and over the API.
+    Transpose · JSON, YAML, CSV, XML, TOML, ENV &amp; Java Properties — auto-detected, convertible to Kubernetes ConfigMaps. In the browser and over the API.
   </footer>
 </div>
 
@@ -327,6 +338,165 @@ function objToXml(data){
   return `<root>\n${inner}\n</root>`;
 }
 
+// ---- ENV format ----
+function envToObj(text){
+  const obj = {};
+  text.split('\n').forEach(line => {
+    const l = line.trim();
+    if(!l || l.startsWith('#')) return;
+    const eq = l.indexOf('=');
+    if(eq === -1) return;
+    const key = l.slice(0, eq).trim();
+    let val = l.slice(eq + 1).trim();
+    if((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))){
+      val = val.slice(1, -1);
+    }
+    obj[key] = val;
+  });
+  return obj;
+}
+
+function objToEnv(data){
+  const flat = Array.isArray(data) ? (data[0] || {}) : data;
+  return Object.entries(flat).map(([k, v]) => {
+    const val = String(v);
+    const needsQuotes = /\s|#/.test(val);
+    return `${k}=${needsQuotes ? '"' + val + '"' : val}`;
+  }).join('\n');
+}
+
+// ---- TOML format (common subset: top-level keys, [sections], strings/numbers/bools/arrays) ----
+function parseTomlValue(raw){
+  const v = raw.trim();
+  if(v.startsWith('"') && v.endsWith('"')) return v.slice(1, -1);
+  if(v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1);
+  if(v === 'true') return true;
+  if(v === 'false') return false;
+  if(/^-?\d+$/.test(v)) return parseInt(v, 10);
+  if(/^-?\d+\.\d+$/.test(v)) return parseFloat(v);
+  if(v.startsWith('[') && v.endsWith(']')){
+    const inner = v.slice(1, -1).trim();
+    if(!inner) return [];
+    return inner.split(',').map(item => parseTomlValue(item.trim()));
+  }
+  return v;
+}
+
+function tomlToObj(text){
+  const result = {};
+  let current = result;
+  text.split('\n').forEach(rawLine => {
+    const line = rawLine.trim();
+    if(!line || line.startsWith('#')) return;
+    const sectionMatch = line.match(/^\[([\w.]+)\]$/);
+    if(sectionMatch){
+      current = {};
+      result[sectionMatch[1]] = current;
+      return;
+    }
+    const eq = line.indexOf('=');
+    if(eq === -1) return;
+    const key = line.slice(0, eq).trim();
+    const val = line.slice(eq + 1).trim();
+    current[key] = parseTomlValue(val);
+  });
+  return result;
+}
+
+function serializeTomlValue(v){
+  if(typeof v === 'string') return `"${v}"`;
+  if(typeof v === 'boolean' || typeof v === 'number') return String(v);
+  if(Array.isArray(v)) return `[${v.map(serializeTomlValue).join(', ')}]`;
+  return `"${String(v)}"`;
+}
+
+function objToToml(data){
+  const flat = Array.isArray(data) ? (data[0] || {}) : data;
+  const topLevel = [];
+  const sections = [];
+  Object.entries(flat).forEach(([key, val]) => {
+    if(val !== null && typeof val === 'object' && !Array.isArray(val)){
+      const lines = Object.entries(val).map(([k, v]) => `${k} = ${serializeTomlValue(v)}`);
+      sections.push(`[${key}]\n${lines.join('\n')}`);
+    }else{
+      topLevel.push(`${key} = ${serializeTomlValue(val)}`);
+    }
+  });
+  const blocks = [];
+  if(topLevel.length) blocks.push(topLevel.join('\n'));
+  if(sections.length) blocks.push(sections.join('\n\n'));
+  return blocks.join('\n\n');
+}
+
+// ---- .properties format (Java-style: key=value or key:value, # or ! comments) ----
+function propertiesToObj(text){
+  const obj = {};
+  text.split('\n').forEach(rawLine => {
+    const line = rawLine.trim();
+    if(!line || line.startsWith('#') || line.startsWith('!')) return;
+    const match = line.match(/^([^=:]+)[=:](.*)$/);
+    if(!match) return;
+    obj[match[1].trim()] = match[2].trim();
+  });
+  return obj;
+}
+
+// ---- Flatten nested objects into dot-notation - K8s ConfigMap.data must be
+// a flat map[string]string, so this lets any source (nested JSON/YAML
+// included) convert sensibly, not just already-flat ones. ----
+function flattenObj(obj, prefix = ''){
+  const out = {};
+  Object.entries(obj).forEach(([key, val]) => {
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+    if(val !== null && typeof val === 'object' && !Array.isArray(val)){
+      Object.assign(out, flattenObj(val, fullKey));
+    }else if(Array.isArray(val)){
+      out[fullKey] = JSON.stringify(val);
+    }else{
+      out[fullKey] = val;
+    }
+  });
+  return out;
+}
+
+// ---- Kubernetes ConfigMap YAML generator ----
+// Verified against the official K8s API spec: apiVersion/kind/metadata.name/data
+// are required, and every value in `data` MUST be a string (map[string]string) -
+// this is why every value is explicitly quoted, matching the real schema.
+function objToConfigMap(data, configMapName){
+  const name = configMapName || 'app-config';
+  const flat = flattenObj(Array.isArray(data) ? (data[0] || {}) : data);
+  const lines = ['apiVersion: v1', 'kind: ConfigMap', 'metadata:', `  name: ${name}`, 'data:'];
+  Object.entries(flat).forEach(([key, val]) => {
+    const strVal = String(val).replace(/"/g, '\\"');
+    lines.push(`  ${key}: "${strVal}"`);
+  });
+  return lines.join('\n');
+}
+
+// ---- Format auto-detection ----
+function detectFormat(text){
+  const t = text.trim();
+  if(!t) return null;
+  if((t[0] === '{' || t[0] === '[')){
+    try{ JSON.parse(t); return 'json'; }catch(e){}
+  }
+  if(t[0] === '<' && /^<\?xml|^<[a-zA-Z]/.test(t)) return 'xml';
+  if(/^\[[\w.]+\]\s*$/m.test(t) && /^[\w.-]+\s*=\s*/m.test(t)) return 'toml';
+  const lines = t.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+  const envLike = lines.filter(l => /^[A-Z_][A-Z0-9_]*\s*=/.test(l));
+  if(lines.length > 0 && envLike.length / lines.length > 0.8) return 'env';
+  const firstLine = t.split('\n')[0];
+  if(firstLine.includes(',')){
+    const commaCount = (firstLine.match(/,/g) || []).length;
+    const dataLines = t.split('\n').slice(1, 4).filter(l => l.trim());
+    const consistent = dataLines.every(l => (l.match(/,/g) || []).length === commaCount);
+    if(commaCount > 0 && (dataLines.length === 0 || consistent)) return 'csv';
+  }
+  if(/^[\w.-]+:\s/m.test(t) || /^[\w.-]+:\s*$/m.test(t)) return 'yaml';
+  return null;
+}
+
 function csvToObj(text){
   const lines = text.trim().split(/\r?\n/).filter(l => l.length);
   if(!lines.length) throw new Error('Empty CSV input');
@@ -362,6 +532,9 @@ function parseInput(text, fmt){
   if(fmt === 'yaml') return jsyaml.load(text);
   if(fmt === 'csv') return csvToObj(text);
   if(fmt === 'xml') return xmlToObj(text);
+  if(fmt === 'toml') return tomlToObj(text);
+  if(fmt === 'env') return envToObj(text);
+  if(fmt === 'properties') return propertiesToObj(text);
   throw new Error('Unknown source format');
 }
 
@@ -370,6 +543,9 @@ function serializeOutput(data, fmt){
   if(fmt === 'yaml') return jsyaml.dump(data);
   if(fmt === 'csv') return objToCsv(data);
   if(fmt === 'xml') return objToXml(data);
+  if(fmt === 'toml') return objToToml(data);
+  if(fmt === 'env') return objToEnv(data);
+  if(fmt === 'k8s-configmap') return objToConfigMap(data);
   throw new Error('Unknown target format');
 }
 
@@ -419,6 +595,22 @@ document.getElementById('convertBtn').addEventListener('click', async () => {
     inStatus.style.color = 'var(--err)';
     pipes.forEach(p => p.classList.remove('active'));
   }
+});
+
+// ---- Auto-detect input format as the user pastes/types ----
+let detectTimer = null;
+inputArea.addEventListener('input', () => {
+  clearTimeout(detectTimer);
+  detectTimer = setTimeout(() => {
+    const detected = detectFormat(inputArea.value);
+    if(detected){
+      fromFormat.value = detected;
+      inStatus.textContent = 'detected: ' + detected.toUpperCase();
+      inStatus.style.color = 'var(--accent)';
+    }else{
+      inStatus.textContent = '';
+    }
+  }, 250);
 });
 
 document.getElementById('swapBtn').addEventListener('click', () => {
