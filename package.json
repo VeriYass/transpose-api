@@ -23,6 +23,7 @@
     "stripe": "^22.3.2"
   },
   "devDependencies": {
+    "jsdom": "^30.0.0",
     "pg-mem": "^3.0.14"
   }
 }

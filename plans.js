@@ -1,22 +1,33 @@
 // plans.js
 // Single source of truth for tiers. Update the priceId values after you
 // create the matching Products/Prices in the Stripe Dashboard (see README).
+//
+// resetPeriod matters: 'lifetime' means the limit is a flat cap that never
+// renews (Free is 50 calls, ever — not 50/month); 'monthly' means it resets
+// every calendar month (Build/Scale). middleware.js branches on this.
 
 const PLANS = {
   free: {
     name: 'Free',
-    priceId: null, // no Stripe price — issued directly, no checkout needed
-    monthlyLimit: 100,
+    // No Stripe *price* (it's $0), but it DOES go through Stripe Checkout —
+    // mode: 'setup' in server.js, a card-verification session with no
+    // charge. priceId stays null; server.js branches on plan === 'free'
+    // before ever consulting priceId.
+    priceId: null,
+    limit: 50,
+    resetPeriod: 'lifetime',
   },
   build: {
     name: 'Build',
     priceId: process.env.STRIPE_PRICE_BUILD || 'price_REPLACE_WITH_BUILD_PRICE_ID',
-    monthlyLimit: 5000,
+    limit: 5000,
+    resetPeriod: 'monthly',
   },
   scale: {
     name: 'Scale',
     priceId: process.env.STRIPE_PRICE_SCALE || 'price_REPLACE_WITH_SCALE_PRICE_ID',
-    monthlyLimit: 25000,
+    limit: 25000,
+    resetPeriod: 'monthly',
   },
 };
 

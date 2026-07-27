@@ -8,7 +8,7 @@ const Stripe = require('stripe');
 
 const db = require('./db');
 const { PLANS, planForPriceId } = require('./plans');
-const { requireApiKey } = require('./middleware');
+const { requireApiKey, authenticateApiKey } = require('./middleware');
 const { convert, SUPPORTED_FORMATS } = require('./convert');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_missing');
@@ -43,6 +43,61 @@ app.post(
       case 'checkout.session.completed': {
         const session = event.data.object;
         const stripeCustomerId = session.customer;
+
+        // ---------------------------------------------------------------
+        // Free tier: a $0 card-verification session (mode: 'setup'), no
+        // subscription attached. We still require a card on file so the
+        // same person can't stack up unlimited 50-call allowances just by
+        // reusing a new email address each time — the card's Stripe
+        // "fingerprint" is stable across signups even when the email,
+        // name, and Stripe customer object are all different.
+        // ---------------------------------------------------------------
+        if (session.mode === 'setup') {
+          (async () => {
+            try {
+              const setupIntent = await stripe.setupIntents.retrieve(session.setup_intent);
+              const paymentMethod = await stripe.paymentMethods.retrieve(setupIntent.payment_method);
+              const fingerprint = paymentMethod.card?.fingerprint || null;
+
+              const existingCustomerId = fingerprint
+                ? await db.getCustomerIdByCardFingerprint(fingerprint)
+                : null;
+
+              if (existingCustomerId) {
+                // This card already has a free key under a different
+                // customer/email. Record this new customer id (so we have
+                // an audit trail of the attempt) but do NOT mint a second
+                // key — /api/key-for-session falls back to a fingerprint
+                // lookup so this session still resolves to the ORIGINAL key.
+                await db.upsertCustomer(stripeCustomerId, {
+                  email: session.customer_details?.email,
+                  plan: 'free',
+                  status: 'duplicate_card',
+                  cardFingerprint: fingerprint,
+                });
+                console.log(`⚠️  Free signup ${stripeCustomerId} reused a card already tied to ${existingCustomerId} — no new key issued.`);
+                return;
+              }
+
+              await db.upsertCustomer(stripeCustomerId, {
+                email: session.customer_details?.email,
+                plan: 'free',
+                status: 'active',
+                cardFingerprint: fingerprint,
+              });
+              const apiKey = `tp_free_${nanoid(32)}`;
+              await db.createApiKey(apiKey, stripeCustomerId, 'free');
+              console.log(`✅ New free subscriber ${stripeCustomerId} (card verified) — API key: ${apiKey}`);
+            } catch (err) {
+              console.error('Failed to process free card verification:', err);
+            }
+          })();
+          break;
+        }
+
+        // ---------------------------------------------------------------
+        // Paid tiers: real subscription.
+        // ---------------------------------------------------------------
         stripe.subscriptions
           .retrieve(session.subscription)
           .then(async (sub) => {
@@ -134,45 +189,52 @@ app.post('/v1/convert', requireApiKey, async (req, res) => {
 
   try {
     const result = convert(String(data), from, to);
-    const used = await db.recordUsage(req.apiKey);
+    await db.recordUsage(req.apiKey);
+    // req.used was computed by requireApiKey BEFORE this request's own
+    // recordUsage() call, so the true post-request total is req.used + 1.
+    // (The old code used recordUsage's return value here, which is only
+    // today's per-day bucket count — not the running total the limit is
+    // actually enforced against. That made the number shown after every
+    // conversion wrong, e.g. "3 calls used" on someone's 47th call.)
     res.json({
       result,
-      usage: { used, limit: req.planLimit, plan: req.plan },
+      usage: { used: req.used + 1, limit: req.planLimit, plan: req.plan },
     });
   } catch (err) {
     res.status(422).json({ error: 'conversion_failed', message: err.message });
   }
 });
 
-// ---- Free tier signup: no payment, just issue a capped key ----
-// Wire this to a real email-capture form. Kept deliberately simple here.
-app.post('/api/signup-free', async (req, res) => {
-  const { email } = req.body || {};
-  if (!email) return res.status(400).json({ error: 'email_required' });
-
-  try {
-    const fakeCustomerId = `free_${nanoid(16)}`;
-    const apiKey = `tp_free_${nanoid(32)}`;
-
-    await db.upsertCustomer(fakeCustomerId, { email, plan: 'free', status: 'active' });
-    await db.createApiKey(apiKey, fakeCustomerId, 'free');
-
-    res.json({ apiKey, plan: 'free', monthlyLimit: PLANS.free.monthlyLimit });
-  } catch (err) {
-    console.error('signup-free failed:', err.message);
-    res.status(500).json({ error: 'signup_failed', message: err.message });
-  }
-});
-
-// ---- Paid tier signup: create a Stripe Checkout session ----
+// ---- Signup / upgrade: create a Stripe Checkout session ----
+// Free and paid plans both go through Stripe now. Free uses mode: 'setup' —
+// a $0 session that verifies a real card without charging it, so the same
+// person can't stack up multiple 50-call allowances by reusing a fresh
+// email each time (see the webhook handler's fingerprint-dedup logic).
+// Paid plans use the normal mode: 'subscription' flow, unchanged.
 app.post('/api/checkout', async (req, res) => {
   const { plan, email } = req.body || {};
-  const planConfig = PLANS[plan];
 
+  if (plan === 'free') {
+    if (!email) return res.status(400).json({ error: 'email_required' });
+    try {
+      const session = await stripe.checkout.sessions.create({
+        mode: 'setup',
+        customer_email: email,
+        success_url: `${process.env.APP_URL || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}&plan=free`,
+        cancel_url: `${process.env.APP_URL || 'http://localhost:3000'}/cancel`,
+      });
+      return res.json({ checkoutUrl: session.url });
+    } catch (err) {
+      console.error('Free checkout session creation failed:', err.message);
+      return res.status(500).json({ error: 'checkout_failed', message: err.message });
+    }
+  }
+
+  const planConfig = PLANS[plan];
   if (!planConfig || !planConfig.priceId) {
     return res.status(400).json({
       error: 'invalid_plan',
-      message: `"plan" must be one of: ${Object.keys(PLANS).filter((p) => PLANS[p].priceId).join(', ')}`,
+      message: `"plan" must be one of: free, ${Object.keys(PLANS).filter((p) => PLANS[p].priceId).join(', ')}`,
     });
   }
 
@@ -192,7 +254,7 @@ app.post('/api/checkout', async (req, res) => {
 });
 
 // ---- After-checkout key retrieval ----
-// The Stripe payment link redirects to /success?session_id={CHECKOUT_SESSION_ID}.
+// Stripe redirects to /success?session_id={CHECKOUT_SESSION_ID}[&plan=free].
 // The success page polls this endpoint until the webhook has issued the key.
 app.get('/api/key-for-session', async (req, res) => {
   const { session_id: sessionId } = req.query || {};
@@ -201,6 +263,34 @@ app.get('/api/key-for-session', async (req, res) => {
   }
   try {
     const session = await stripe.checkout.sessions.retrieve(String(sessionId));
+
+    if (session.mode === 'setup') {
+      // Free tier: "paid" isn't a concept here — completion is what matters.
+      if (session.status !== 'complete') {
+        return res.status(402).json({ error: 'not_completed' });
+      }
+      let apiKey = await db.getApiKeyByCustomer(session.customer);
+      if (!apiKey) {
+        // No key under THIS session's customer id — either the webhook
+        // hasn't run yet, or (duplicate-card case) the key actually lives
+        // under an earlier customer id. Try resolving by card fingerprint
+        // before giving up and telling the client to keep polling.
+        try {
+          const setupIntent = await stripe.setupIntents.retrieve(session.setup_intent);
+          const paymentMethod = await stripe.paymentMethods.retrieve(setupIntent.payment_method);
+          const fingerprint = paymentMethod.card?.fingerprint;
+          if (fingerprint) {
+            const existingCustomerId = await db.getCustomerIdByCardFingerprint(fingerprint);
+            if (existingCustomerId) apiKey = await db.getApiKeyByCustomer(existingCustomerId);
+          }
+        } catch (lookupErr) {
+          console.error('Fingerprint fallback lookup failed:', lookupErr.message);
+        }
+      }
+      if (!apiKey) return res.status(202).json({ status: 'pending' });
+      return res.json({ apiKey, plan: 'free' });
+    }
+
     if (session.payment_status !== 'paid') {
       return res.status(402).json({ error: 'not_paid' });
     }
@@ -217,8 +307,8 @@ app.get('/api/key-for-session', async (req, res) => {
 });
 
 // ---- Look up usage for the currently-authenticated key ----
-app.get('/api/usage', requireApiKey, (req, res) => {
-  res.json({ plan: req.plan, used: req.usedThisMonth, limit: req.planLimit });
+app.get('/api/usage', authenticateApiKey, (req, res) => {
+  res.json({ plan: req.plan, used: req.used, limit: req.planLimit });
 });
 
 // ---------------------------------------------------------------------------

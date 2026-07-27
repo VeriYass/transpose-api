@@ -24,26 +24,30 @@
     padding:16px;font-size:14px;word-break:break-all;margin-bottom:14px;min-height:54px;
     display:flex;align-items:center;justify-content:space-between;gap:12px;}
   .keybox .spin{color:var(--text-dim);font-size:13px}
-  button{background:var(--accent);color:#1A1300;border:none;font-family:var(--mono);
-    font-weight:600;font-size:13px;padding:10px 16px;border-radius:6px;cursor:pointer;white-space:nowrap;}
-  button:hover{background:#F0B672}
+  button, .btn{background:var(--accent);color:#1A1300;border:none;font-family:var(--mono);
+    font-weight:600;font-size:13px;padding:10px 16px;border-radius:6px;cursor:pointer;white-space:nowrap;
+    text-decoration:none;display:inline-block;}
+  button:hover, .btn:hover{background:#F0B672}
   .warn{border-left:3px solid var(--accent);padding:10px 14px;background:#1C1710;
     font-size:13px;color:var(--text);font-family:var(--sans);border-radius:0 6px 6px 0;margin-bottom:18px;}
   pre{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;
     font-size:12px;line-height:1.7;overflow-x:auto;}
   .k{color:#79B8FF}.s{color:var(--ok)}.c{color:var(--text-dim)}
   a{color:var(--accent)}
+  #startBtn{display:none;margin-bottom:18px}
 </style>
 </head>
 <body>
 <div class="card">
-  <h1><span class="ok">✓</span> Payment received — welcome aboard</h1>
-  <p>Your API key is being generated. It will appear below within a few seconds.</p>
+  <h1 id="heading"><span class="ok">✓</span> Payment received — welcome aboard</h1>
+  <p id="subhead">Your API key is being generated. It will appear below within a few seconds.</p>
 
   <div class="keybox">
     <span id="keyText" class="spin">Issuing your key…</span>
     <button id="copyBtn" style="display:none">Copy</button>
   </div>
+
+  <a id="startBtn" class="btn" href="/">Start converting →</a>
 
   <div class="warn">Save this key now — treat it like a password. It won't be shown again on this page after you leave.</div>
 
@@ -53,15 +57,26 @@
   -H <span class="k">"Content-Type: application/json"</span> \
   -d <span class="s">'{"from":"csv","to":"json","data":"name,age\nPriya,31"}'</span></pre>
 
-  <p>Questions or issues? Reply to your Stripe receipt email and we'll get back to you.</p>
+  <p id="supportLine">Questions or issues? Reply to your Stripe receipt email and we'll get back to you.</p>
 </div>
 
 <script>
 const params = new URLSearchParams(location.search);
 const sessionId = params.get('session_id');
+const isFree = params.get('plan') === 'free';
 const keyText = document.getElementById('keyText');
 const copyBtn = document.getElementById('copyBtn');
+const startBtn = document.getElementById('startBtn');
 let attempts = 0;
+
+if(isFree){
+  // A free signup is a $0 card-verification session, not a real charge —
+  // "payment received" and "reply to your Stripe receipt" are both wrong
+  // here, since there's no payment and no receipt.
+  document.getElementById('heading').innerHTML = '<span class="ok">✓</span> Card verified — here\'s your free key';
+  document.getElementById('subhead').textContent = 'No charge was made. Your key is being generated and will appear below within a few seconds.';
+  document.getElementById('supportLine').textContent = 'Questions or issues? Contact support with the email you signed up with.';
+}
 
 async function fetchKey(){
   if(!sessionId){
@@ -76,6 +91,11 @@ async function fetchKey(){
       keyText.textContent = data.apiKey;
       keyText.classList.remove('spin');
       copyBtn.style.display = 'inline-block';
+      // Storing the key here means going "Start converting" lands the user
+      // on / already unlocked — initGate() there validates whatever's in
+      // localStorage before showing the gate.
+      try{ localStorage.setItem('transposeApiKey', data.apiKey); }catch(e){}
+      startBtn.style.display = 'inline-block';
       return;
     }
     if(res.status === 202 && attempts < 20){
@@ -83,10 +103,12 @@ async function fetchKey(){
       return;
     }
     if(res.status === 402){
-      keyText.textContent = 'Payment not confirmed yet. Refresh in a minute.';
+      keyText.textContent = isFree
+        ? 'Card verification not confirmed yet. Refresh in a minute.'
+        : 'Payment not confirmed yet. Refresh in a minute.';
       return;
     }
-    keyText.textContent = attempts < 20 ? 'Still working…' : 'Taking longer than expected — refresh this page, or contact support with your receipt.';
+    keyText.textContent = attempts < 20 ? 'Still working…' : 'Taking longer than expected — refresh this page, or contact support.';
     if(attempts < 20) setTimeout(fetchKey, 3000);
   }catch(e){
     if(attempts < 20) setTimeout(fetchKey, 3000);

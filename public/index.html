@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Transpose — data format converter</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -134,15 +133,66 @@
   .code-block .c{ color: var(--text-dim); }
 
   footer{ border-top: 1px solid var(--border); padding: 24px 0 48px; font-size: 12px; color: var(--text-dim); font-family: var(--sans); }
+
+  /* GATE — blocks the tool until a free (or paid) key is confirmed */
+  #gateOverlay{
+    position: fixed; inset: 0; background: var(--bg); z-index: 2000;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  .gate-card{ max-width: 440px; width: 100%; font-family: var(--sans); position: relative; }
+  .gate-close{
+    position: absolute; top: -6px; right: -6px; background: none; border: 1px solid var(--border);
+    color: var(--text-dim); width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 14px;
+  }
+  .gate-title{ font-family: var(--sans); font-weight: 600; font-size: 22px; text-align:center; margin: 0 0 8px; color: var(--text); }
+  .gate-sub{ color: var(--text-dim); font-size: 13px; text-align:center; margin: 0 0 24px; line-height:1.6; }
+  .gate-input{
+    width:100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    font-family: var(--mono); font-size: 13px; padding: 10px 12px; border-radius: 6px;
+    margin-bottom: 12px; box-sizing: border-box;
+  }
+  .gate-link-btn{
+    background:none; border:none; color:var(--text-dim); text-decoration:underline;
+    cursor:pointer; font-family:var(--mono); font-size:12px;
+  }
+  .gate-error{ color: var(--err); font-size: 12px; text-align:center; margin-top: 10px; min-height: 14px; }
+  .tier-limit{ display:none; }
 </style>
 </head>
 <body>
 
+<div id="gateOverlay">
+  <div class="gate-card">
+    <button class="gate-close" id="gateCloseBtn" style="display:none" title="Close">✕</button>
+    <div class="eyebrow" style="justify-content:center"><span class="dot"></span>Free key required</div>
+    <h2 class="gate-title">Get a free key to use Transpose</h2>
+    <p class="gate-sub">50 free calls, a flat allowance that never resets. We verify a card to keep one free tier per person — it's a $0 check, never charged, done on Stripe's own page. Every conversion on this page runs through the real API, same endpoint your code would call.</p>
+
+    <div id="gateSignup">
+      <input id="gateEmailInput" class="gate-input" type="email" placeholder="you@example.com">
+      <button id="gateSignupBtn" class="primary" style="width:100%">Verify card &amp; get free key</button>
+      <div style="text-align:center;margin-top:14px">
+        <button id="gateShowExistingBtn" class="gate-link-btn">I already have a key</button>
+      </div>
+    </div>
+
+    <div id="gateExisting" style="display:none">
+      <input id="gateExistingKeyInput" class="gate-input" type="text" placeholder="tp_free_... or tp_live_...">
+      <button id="gateExistingBtn" class="primary" style="width:100%">Continue</button>
+      <div style="text-align:center;margin-top:14px">
+        <button id="gateShowSignupBtn" class="gate-link-btn">Get a new free key instead</button>
+      </div>
+    </div>
+
+    <div class="gate-error" id="gateError"></div>
+  </div>
+</div>
+
 <div class="wrap">
   <header>
-    <div class="eyebrow"><span class="dot"></span>Deterministic conversion — no data leaves your browser in demo mode</div>
+    <div class="eyebrow"><span class="dot"></span>Live, API-backed conversion — free key required, card verified</div>
     <h1>Config in. <span class="arrow">→</span> Kubernetes out.</h1>
-    <p class="sub">Drop in a Spring Boot <code>.properties</code> file, JSON, YAML, TOML, XML, CSV, INI, or <code>.env</code> — Transpose auto-detects the format and gives you back a valid Kubernetes ConfigMap or Secret, or any other format you need. Every value correctly stringified (and base64-encoded for Secrets), because that's what the K8s schema actually requires. Same deterministic engine runs behind the API.</p>
+    <p class="sub">Drop in a Spring Boot <code>.properties</code> file, JSON, YAML, TOML, XML, CSV, INI, or <code>.env</code> — Transpose auto-detects the format and gives you back a valid Kubernetes ConfigMap or Secret, or any other format you need. Every value correctly stringified (and base64-encoded for Secrets), because that's what the K8s schema actually requires. This page calls the exact same <code>/v1/convert</code> endpoint your code would.</p>
   </header>
 
   <section class="converter">
@@ -188,7 +238,7 @@
     </div>
 
     <div class="actions">
-      <div class="meter" id="meter"><b>500</b> / 500 free conversions left today · resets at midnight</div>
+      <div class="meter" id="meter"><b>—</b> calls used this month</div>
       <div class="btn-group">
         <button class="ghost" id="copyBtn">Copy output</button>
         <button class="primary" id="convertBtn">Convert</button>
@@ -199,7 +249,7 @@
   <section class="pipeline">
     <div class="pipeline-label">What actually happens to your input</div>
     <div class="pipe-strip">
-      <span class="seg active" id="p1">parse</span><span class="join">→</span>
+      <span class="seg active" id="p1">send to API</span><span class="join">→</span>
       <span class="seg" id="p2">validate structure</span><span class="join">→</span>
       <span class="seg" id="p3">normalize types</span><span class="join">→</span>
       <span class="seg" id="p4">serialize target</span><span class="join">→</span>
@@ -210,27 +260,27 @@
   <section class="api-section">
     <div class="api-grid">
       <div class="api-copy">
-        <h2>The web tool is the demo. The API is the product.</h2>
-        <p>If you're converting data by hand, this page is free forever. If you're converting data in a pipeline — nightly exports, webhook payloads, ETL jobs — you want this behind an endpoint, not a browser tab. Usage-based pricing, no per-seat nonsense.</p>
+        <h2>The web tool runs on the real API.</h2>
+        <p>Every conversion above is a live call to the same endpoint your code would use. If you're converting data by hand, the free tier covers casual use. If you're converting data in a pipeline — nightly exports, webhook payloads, ETL jobs — you want this behind an endpoint in your own scripts. Usage-based pricing, no per-seat nonsense.</p>
         <div class="tiers">
           <div class="tier">
             <div><div class="tier-name">Free</div><div class="tier-desc">For trying it in your codebase</div></div>
             <div style="display:flex;align-items:center;gap:12px">
-              <div class="tier-price">100 calls/mo</div>
+              <div class="tier-price">50 calls total</div>
               <button id="freeKeyBtn" style="background:none;border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-weight:600;font-size:12px;padding:8px 14px;border-radius:6px;cursor:pointer;white-space:nowrap">Get free key</button>
             </div>
           </div>
           <div class="tier featured">
             <div><div class="tier-name">Build</div><div class="tier-desc">For a live pipeline</div></div>
             <div style="display:flex;align-items:center;gap:12px">
-              <div class="tier-price">$19/mo · 5,000 calls</div>
+              <div class="tier-price">$19/mo<span class="tier-limit"> · 5,000 calls</span></div>
               <a href="https://buy.stripe.com/aFadRaahHflhatI06qfjG01" style="background:var(--accent);color:#1A1300;text-decoration:none;font-weight:600;font-size:12px;padding:8px 14px;border-radius:6px;white-space:nowrap">Subscribe</a>
             </div>
           </div>
           <div class="tier">
             <div><div class="tier-name">Scale</div><div class="tier-desc">For production workloads</div></div>
             <div style="display:flex;align-items:center;gap:12px">
-              <div class="tier-price">$49/mo · 25,000 calls</div>
+              <div class="tier-price">$49/mo<span class="tier-limit"> · 25,000 calls</span></div>
               <a href="https://buy.stripe.com/8x214ofC1ehd1XcbP8fjG00" id="scaleSubscribeLink" style="background:none;border:1px solid var(--accent-dim);color:var(--accent);text-decoration:none;font-weight:600;font-size:12px;padding:8px 14px;border-radius:6px;white-space:nowrap">Subscribe</a>
             </div>
           </div>
@@ -265,7 +315,7 @@ data:
   </section>
 
   <footer>
-    Transpose · JSON, YAML, CSV, XML, TOML, INI, ENV &amp; Java Properties — auto-detected, convertible to Kubernetes ConfigMaps and Secrets. In the browser and over the API.
+    Transpose · JSON, YAML, CSV, XML, TOML, INI, ENV &amp; Java Properties — auto-detected, convertible to Kubernetes ConfigMaps and Secrets. Free key required, backed by the real API.
   </footer>
 </div>
 
@@ -279,527 +329,7 @@ const outStatus = document.getElementById('outStatus');
 const meter = document.getElementById('meter');
 const pipes = ['p1','p2','p3','p4','p5'].map(id => document.getElementById(id));
 
-let remaining = 500;
-// Self-contained XML support using only native browser APIs (no CDN dependency,
-// which had a known reliability bug where the library's global export sometimes
-// failed to load, silently breaking every script on the page).
-function xmlToObj(text){
-  const doc = new DOMParser().parseFromString(text, 'text/xml');
-  const errorNode = doc.querySelector('parsererror');
-  if(errorNode) throw new Error('Invalid XML: ' + errorNode.textContent.trim().slice(0, 200));
-  function elementToObj(el){
-    const children = Array.from(el.children);
-    if(children.length === 0){
-      const t = el.textContent.trim();
-      return t === '' ? null : t;
-    }
-    const obj = {};
-    children.forEach(child => {
-      const val = elementToObj(child);
-      if(obj[child.tagName] !== undefined){
-        if(!Array.isArray(obj[child.tagName])) obj[child.tagName] = [obj[child.tagName]];
-        obj[child.tagName].push(val);
-      }else{
-        obj[child.tagName] = val;
-      }
-    });
-    return obj;
-  }
-  const root = doc.documentElement;
-  return { [root.tagName]: elementToObj(root) };
-}
-
-function escapeXml(str){
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
-
-function objToXmlNode(key, value, indent){
-  const pad = '  '.repeat(indent);
-  if(Array.isArray(value)){
-    return value.map(v => objToXmlNode(key, v, indent)).join('\n');
-  }
-  if(value !== null && typeof value === 'object'){
-    const inner = Object.entries(value).map(([k, v]) => objToXmlNode(k, v, indent + 1)).join('\n');
-    return `${pad}<${key}>\n${inner}\n${pad}</${key}>`;
-  }
-  return `${pad}<${key}>${escapeXml(value)}</${key}>`;
-}
-
-function objToXml(data){
-  if(Array.isArray(data)){
-    const inner = data.map(item => objToXmlNode('item', item, 1)).join('\n');
-    return `<root>\n${inner}\n</root>`;
-  }
-  const entries = Object.entries(data);
-  if(entries.length === 1){
-    const [key, value] = entries[0];
-    return objToXmlNode(key, value, 0);
-  }
-  const inner = entries.map(([k, v]) => objToXmlNode(k, v, 1)).join('\n');
-  return `<root>\n${inner}\n</root>`;
-}
-
-// ---- ENV format ----
-function envToObj(text){
-  const obj = {};
-  text.split('\n').forEach(line => {
-    const l = line.trim();
-    if(!l || l.startsWith('#')) return;
-    const eq = l.indexOf('=');
-    if(eq === -1) return;
-    const key = l.slice(0, eq).trim();
-    let val = l.slice(eq + 1).trim();
-    if((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))){
-      val = val.slice(1, -1);
-    }
-    obj[key] = val;
-  });
-  return obj;
-}
-
-function objToEnv(data){
-  const flat = Array.isArray(data) ? (data[0] || {}) : data;
-  return Object.entries(flat).map(([k, v]) => {
-    const val = String(v);
-    const needsQuotes = /\s|#/.test(val);
-    return `${k}=${needsQuotes ? '"' + val + '"' : val}`;
-  }).join('\n');
-}
-
-// ---------------------------------------------------------------------------
-// TOML — hand-rolled recursive-descent parser + serializer (no CDN, per the
-// XML note above). Covers bare/quoted keys, dotted keys, basic and literal
-// strings (incl. triple-quoted), integers/floats with underscores, booleans,
-// arrays (nested), inline tables, [table] and [[array-of-tables]] headers.
-// Cross-checked against smol-toml (the spec-compliant library the API uses
-// server-side) on representative inputs and produces identical parse trees.
-// ---------------------------------------------------------------------------
-function parseToml(text){
-  let i = 0;
-  const n = text.length;
-
-  function isSpace(c){ return c === ' ' || c === '\t'; }
-  function skipInlineWs(){ while(i < n && isSpace(text[i])) i++; }
-  function skipWsAndComments(){
-    while(i < n){
-      if(isSpace(text[i]) || text[i] === '\r' || text[i] === '\n'){ i++; continue; }
-      if(text[i] === '#'){ while(i < n && text[i] !== '\n') i++; continue; }
-      break;
-    }
-  }
-  function skipLineWsAndComments(){
-    while(i < n){
-      if(isSpace(text[i])){ i++; continue; }
-      if(text[i] === '#'){ while(i < n && text[i] !== '\n') i++; continue; }
-      break;
-    }
-  }
-
-  function parseBareOrQuotedKey(){
-    skipInlineWs();
-    if(text[i] === '"' || text[i] === "'") return parseString();
-    let start = i;
-    while(i < n && /[A-Za-z0-9_-]/.test(text[i])) i++;
-    return text.slice(start, i);
-  }
-
-  function parseDottedKey(){
-    const parts = [parseBareOrQuotedKey()];
-    skipInlineWs();
-    while(text[i] === '.'){
-      i++;
-      parts.push(parseBareOrQuotedKey());
-      skipInlineWs();
-    }
-    return parts;
-  }
-
-  function parseString(){
-    const quote = text[i];
-    if(text[i] === quote && text[i+1] === quote && text[i+2] === quote){
-      i += 3;
-      const start = i;
-      let end = text.indexOf(quote+quote+quote, i);
-      if(end === -1) end = n;
-      let raw = text.slice(start, end);
-      i = end + 3;
-      if(raw.startsWith('\r\n')) raw = raw.slice(2);
-      else if(raw.startsWith('\n')) raw = raw.slice(1);
-      return quote === '"' ? unescapeBasic(raw) : raw;
-    }
-    i++;
-    let result = '';
-    while(i < n && text[i] !== quote){
-      if(quote === '"' && text[i] === '\\'){
-        i++;
-        const esc = text[i];
-        if(esc === 'n'){ result += '\n'; i++; }
-        else if(esc === 't'){ result += '\t'; i++; }
-        else if(esc === 'r'){ result += '\r'; i++; }
-        else if(esc === '"'){ result += '"'; i++; }
-        else if(esc === '\\'){ result += '\\'; i++; }
-        else if(esc === 'b'){ result += '\b'; i++; }
-        else if(esc === 'f'){ result += '\f'; i++; }
-        else if(esc === 'u'){ result += String.fromCodePoint(parseInt(text.slice(i+1, i+5), 16)); i += 5; }
-        else if(esc === 'U'){ result += String.fromCodePoint(parseInt(text.slice(i+1, i+9), 16)); i += 9; }
-        else { result += esc; i++; }
-      }else{
-        result += text[i]; i++;
-      }
-    }
-    i++;
-    return result;
-  }
-
-  function unescapeBasic(s){
-    let result = '';
-    let j = 0;
-    while(j < s.length){
-      if(s[j] === '\\'){
-        const esc = s[j+1];
-        if(esc === '\n'){ j += 2; while(j < s.length && /\s/.test(s[j])) j++; continue; }
-        if(esc === '\r' && s[j+2] === '\n'){ j += 3; while(j < s.length && /\s/.test(s[j])) j++; continue; }
-        if(esc === 'n'){ result += '\n'; j += 2; continue; }
-        if(esc === 't'){ result += '\t'; j += 2; continue; }
-        if(esc === 'r'){ result += '\r'; j += 2; continue; }
-        if(esc === '"'){ result += '"'; j += 2; continue; }
-        if(esc === '\\'){ result += '\\'; j += 2; continue; }
-        result += esc; j += 2; continue;
-      }
-      result += s[j]; j++;
-    }
-    return result;
-  }
-
-  function coerceScalar(raw){
-    if(raw === 'true') return true;
-    if(raw === 'false') return false;
-    if(/^[+-]?\d[\d_]*$/.test(raw)) return parseInt(raw.replace(/_/g, ''), 10);
-    if(/^[+-]?\d[\d_]*\.\d[\d_]*([eE][+-]?\d+)?$/.test(raw) || /^[+-]?\d[\d_]*[eE][+-]?\d+$/.test(raw)){
-      return parseFloat(raw.replace(/_/g, ''));
-    }
-    return raw;
-  }
-
-  function parseValue(){
-    skipInlineWs();
-    const c = text[i];
-    if(c === '"' || c === "'") return parseString();
-    if(c === '[') return parseArray();
-    if(c === '{') return parseInlineTable();
-    let start = i;
-    while(i < n && !/[,\]\}\n\r#]/.test(text[i])) i++;
-    return coerceScalar(text.slice(start, i).trim());
-  }
-
-  function parseArray(){
-    i++;
-    const arr = [];
-    while(true){
-      skipWsAndComments();
-      if(text[i] === ']'){ i++; break; }
-      arr.push(parseValue());
-      skipWsAndComments();
-      if(text[i] === ','){ i++; continue; }
-      skipWsAndComments();
-      if(text[i] === ']'){ i++; break; }
-    }
-    return arr;
-  }
-
-  function parseInlineTable(){
-    i++;
-    const obj = {};
-    skipInlineWs();
-    if(text[i] === '}'){ i++; return obj; }
-    while(true){
-      skipInlineWs();
-      const keyParts = parseDottedKey();
-      skipInlineWs();
-      if(text[i] === '=') i++;
-      const val = parseValue();
-      setNested(obj, keyParts, val);
-      skipInlineWs();
-      if(text[i] === ','){ i++; continue; }
-      skipInlineWs();
-      if(text[i] === '}'){ i++; break; }
-    }
-    return obj;
-  }
-
-  function setNested(obj, keyParts, val){
-    let cur = obj;
-    for(let k = 0; k < keyParts.length - 1; k++){
-      if(!(keyParts[k] in cur) || typeof cur[keyParts[k]] !== 'object') cur[keyParts[k]] = {};
-      cur = cur[keyParts[k]];
-    }
-    cur[keyParts[keyParts.length - 1]] = val;
-  }
-
-  function getOrCreateTable(root, keyParts, isArrayTable){
-    let cur = root;
-    for(let k = 0; k < keyParts.length - 1; k++){
-      const key = keyParts[k];
-      if(!(key in cur)) cur[key] = {};
-      cur = Array.isArray(cur[key]) ? cur[key][cur[key].length - 1] : cur[key];
-    }
-    const lastKey = keyParts[keyParts.length - 1];
-    if(isArrayTable){
-      if(!Array.isArray(cur[lastKey])) cur[lastKey] = [];
-      const t = {};
-      cur[lastKey].push(t);
-      return t;
-    }
-    if(!(lastKey in cur)) cur[lastKey] = {};
-    return cur[lastKey];
-  }
-
-  const root = {};
-  let currentTable = root;
-
-  skipWsAndComments();
-  while(i < n){
-    if(text[i] === '['){
-      if(text[i+1] === '['){
-        i += 2;
-        const keyParts = parseDottedKey();
-        skipInlineWs();
-        if(text[i] === ']' && text[i+1] === ']') i += 2;
-        currentTable = getOrCreateTable(root, keyParts, true);
-      }else{
-        i += 1;
-        const keyParts = parseDottedKey();
-        skipInlineWs();
-        if(text[i] === ']') i += 1;
-        currentTable = getOrCreateTable(root, keyParts, false);
-      }
-      skipLineWsAndComments();
-    }else{
-      const keyParts = parseDottedKey();
-      skipInlineWs();
-      if(text[i] === '=') i++;
-      const val = parseValue();
-      setNested(currentTable, keyParts, val);
-      skipLineWsAndComments();
-    }
-    skipWsAndComments();
-  }
-
-  return root;
-}
-
-function tomlKeyName(k){ return /^[A-Za-z0-9_-]+$/.test(k) ? k : tomlEscapeString(k); }
-function tomlEscapeString(s){
-  return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\t/g, '\\t').replace(/\r/g, '\\r') + '"';
-}
-function tomlSerializeValue(v){
-  if(typeof v === 'string') return tomlEscapeString(v);
-  if(typeof v === 'boolean' || typeof v === 'number') return String(v);
-  if(Array.isArray(v)) return '[' + v.map(tomlSerializeValue).join(', ') + ']';
-  if(v !== null && typeof v === 'object'){
-    return '{ ' + Object.entries(v).map(([k, val]) => `${tomlKeyName(k)} = ${tomlSerializeValue(val)}`).join(', ') + ' }';
-  }
-  return tomlEscapeString(String(v));
-}
-function isPlainTable(v){ return v !== null && typeof v === 'object' && !Array.isArray(v); }
-function isArrayOfTables(v){ return Array.isArray(v) && v.length > 0 && v.every(isPlainTable); }
-
-function objToToml(data){
-  const flat = Array.isArray(data) ? (data[0] || {}) : data;
-  const topLevelLines = [];
-  const blocks = [];
-
-  function emit(obj, path){
-    const scalarLines = [];
-    const subTables = [];
-    const subArrayTables = [];
-    Object.entries(obj).forEach(([k, v]) => {
-      if(isArrayOfTables(v)) subArrayTables.push([k, v]);
-      else if(isPlainTable(v)) subTables.push([k, v]);
-      else scalarLines.push(`${tomlKeyName(k)} = ${tomlSerializeValue(v)}`);
-    });
-    if(path.length){
-      blocks.push([`[${path.map(tomlKeyName).join('.')}]`, ...scalarLines].join('\n'));
-    }else if(scalarLines.length){
-      topLevelLines.push(scalarLines.join('\n'));
-    }
-    subTables.forEach(([k, v]) => emit(v, [...path, k]));
-    subArrayTables.forEach(([k, arr]) => {
-      arr.forEach((item) => {
-        const itemPath = [...path, k];
-        const itemScalars = [];
-        const itemNested = [];
-        Object.entries(item).forEach(([kk, vv]) => {
-          if(isArrayOfTables(vv) || isPlainTable(vv)) itemNested.push([kk, vv]);
-          else itemScalars.push(`${tomlKeyName(kk)} = ${tomlSerializeValue(vv)}`);
-        });
-        blocks.push([`[[${itemPath.map(tomlKeyName).join('.')}]]`, ...itemScalars].join('\n'));
-        itemNested.forEach(([kk, vv]) => {
-          if(isArrayOfTables(vv)){
-            vv.forEach((sub) => emit({ [kk]: [sub] }, itemPath));
-          }else{
-            emit(vv, [...itemPath, kk]);
-          }
-        });
-      });
-    });
-  }
-
-  emit(flat, []);
-  const out = [];
-  if(topLevelLines.length) out.push(topLevelLines.join('\n'));
-  out.push(...blocks);
-  return out.join('\n\n');
-}
-
-// ---------------------------------------------------------------------------
-// INI — sections map to one level of nested objects, same convention TOML
-// uses in this app.
-// ---------------------------------------------------------------------------
-function iniToObj(text){
-  const result = {};
-  let currentSection = null;
-  text.split('\n').forEach(rawLine => {
-    const line = rawLine.trim();
-    if(!line || line.startsWith(';') || line.startsWith('#')) return;
-    const sectionMatch = line.match(/^\[(.+)\]$/);
-    if(sectionMatch){
-      const name = sectionMatch[1].trim();
-      result[name] = result[name] || {};
-      currentSection = result[name];
-      return;
-    }
-    const eq = line.indexOf('=');
-    if(eq === -1) return;
-    const key = line.slice(0, eq).trim();
-    let val = line.slice(eq + 1).trim();
-    if((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))){
-      val = val.slice(1, -1);
-    }
-    const target = currentSection || result;
-    target[key] = coerceValue(val);
-  });
-  return result;
-}
-
-function objToIni(data){
-  const flat = Array.isArray(data) ? (data[0] || {}) : data;
-  const topLines = [];
-  const sectionBlocks = [];
-  Object.entries(flat).forEach(([key, val]) => {
-    if(val !== null && typeof val === 'object' && !Array.isArray(val)){
-      const lines = Object.entries(val).map(([k, v]) => `${k}=${v}`);
-      sectionBlocks.push(`[${key}]\n${lines.join('\n')}`);
-    }else{
-      topLines.push(`${key}=${val}`);
-    }
-  });
-  const blocks = [];
-  if(topLines.length) blocks.push(topLines.join('\n'));
-  if(sectionBlocks.length) blocks.push(sectionBlocks.join('\n\n'));
-  return blocks.join('\n\n');
-}
-
-// ---------------------------------------------------------------------------
-// .properties — now supports writing (previously read-only), matching the
-// server-side fix. Same Java-spec escape rules: \n \t \\ and special chars
-// in keys (: = # ! and space).
-// ---------------------------------------------------------------------------
-function unescapePropertiesValue(v){
-  return v.replace(/\\(.)/g, (_, ch) => {
-    if(ch === 'n') return '\n';
-    if(ch === 't') return '\t';
-    if(ch === 'r') return '\r';
-    return ch;
-  });
-}
-
-function propertiesToObj(text){
-  const obj = {};
-  text.split('\n').forEach(rawLine => {
-    const line = rawLine.trim();
-    if(!line || line.startsWith('#') || line.startsWith('!')) return;
-    const match = line.match(/^([^=:]+)[=:](.*)$/);
-    if(!match) return;
-    const key = unescapePropertiesValue(match[1].trim());
-    const val = unescapePropertiesValue(match[2].trim());
-    obj[key] = val;
-  });
-  return obj;
-}
-
-function escapePropertiesKey(k){
-  return String(k).replace(/\\/g, '\\\\').replace(/[:=#! ]/g, '\\$&');
-}
-function escapePropertiesValue(v){
-  return String(v).replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
-}
-function objToProperties(data){
-  const flat = flattenObj(Array.isArray(data) ? (data[0] || {}) : data);
-  return Object.entries(flat).map(([k, v]) => `${escapePropertiesKey(k)}=${escapePropertiesValue(v)}`).join('\n');
-}
-
-// ---- Flatten nested objects into dot-notation - K8s ConfigMap/Secret .data
-// must be a flat map[string]string, so this lets any source (nested JSON/YAML
-// included) convert sensibly, not just already-flat ones. Reused by the
-// .properties writer for the same reason. ----
-function flattenObj(obj, prefix = ''){
-  const out = {};
-  Object.entries(obj).forEach(([key, val]) => {
-    const fullKey = prefix ? `${prefix}.${key}` : key;
-    if(val !== null && typeof val === 'object' && !Array.isArray(val)){
-      Object.assign(out, flattenObj(val, fullKey));
-    }else if(Array.isArray(val)){
-      out[fullKey] = JSON.stringify(val);
-    }else{
-      out[fullKey] = val;
-    }
-  });
-  return out;
-}
-
-// ---- Kubernetes ConfigMap YAML generator ----
-// Verified against the official K8s API spec: apiVersion/kind/metadata.name/data
-// are required, and every value in `data` MUST be a string (map[string]string) -
-// this is why every value is explicitly quoted, matching the real schema.
-function objToConfigMap(data, configMapName){
-  const name = configMapName || 'app-config';
-  const flat = flattenObj(Array.isArray(data) ? (data[0] || {}) : data);
-  const lines = ['apiVersion: v1', 'kind: ConfigMap', 'metadata:', `  name: ${name}`, 'data:'];
-  Object.entries(flat).forEach(([key, val]) => {
-    const strVal = String(val).replace(/"/g, '\\"');
-    lines.push(`  ${key}: "${strVal}"`);
-  });
-  return lines.join('\n');
-}
-
-// ---- Kubernetes Secret YAML generator ----
-// Same shape as ConfigMap, but K8s requires Secret.data values to be
-// base64-encoded. Uses TextEncoder + manual base64 instead of raw btoa()
-// since btoa is Latin1-only and breaks on multi-byte UTF-8 values.
-function utf8ToBase64(str){
-  const bytes = new TextEncoder().encode(str);
-  let binary = '';
-  bytes.forEach(b => { binary += String.fromCharCode(b); });
-  return btoa(binary);
-}
-
-function objToSecret(data, secretName){
-  const name = secretName || 'app-secret';
-  const flat = flattenObj(Array.isArray(data) ? (data[0] || {}) : data);
-  const lines = ['apiVersion: v1', 'kind: Secret', 'metadata:', `  name: ${name}`, 'type: Opaque', 'data:'];
-  Object.entries(flat).forEach(([key, val]) => {
-    lines.push(`  ${key}: ${utf8ToBase64(String(val))}`);
-  });
-  return lines.join('\n');
-}
-
-// ---- Format auto-detection ----
+// ---- Format auto-detection (UX only — actual parsing now happens server-side) ----
 function detectFormat(text){
   const t = text.trim();
   if(!t) return null;
@@ -832,119 +362,6 @@ function detectFormat(text){
   return null;
 }
 
-// CSV handling per RFC 4180. A naive split(',') silently corrupts any field
-// containing a comma, quote, or newline — producing plausible-looking wrong
-// output rather than an error, which is the worst kind of failure.
-function parseCsvRows(text){
-  const rows = [];
-  let row = [];
-  let field = '';
-  let fieldWasQuoted = false;
-  let inQuotes = false;
-  let i = 0;
-
-  function endField(){
-    row.push(fieldWasQuoted ? field : field.trim());
-    field = '';
-    fieldWasQuoted = false;
-  }
-  function endRow(){
-    endField();
-    rows.push(row);
-    row = [];
-  }
-
-  while(i < text.length){
-    const ch = text[i];
-    if(inQuotes){
-      if(ch === '"'){
-        if(text[i+1] === '"'){ field += '"'; i += 2; continue; }
-        inQuotes = false; i++; continue;
-      }
-      field += ch; i++; continue;
-    }
-    if(ch === '"'){ inQuotes = true; fieldWasQuoted = true; i++; continue; }
-    if(ch === ','){ endField(); i++; continue; }
-    if(ch === '\r'){ if(text[i+1] === '\n') i++; endRow(); i++; continue; }
-    if(ch === '\n'){ endRow(); i++; continue; }
-    field += ch; i++;
-  }
-  if(field !== '' || fieldWasQuoted || row.length > 0) endRow();
-  return rows;
-}
-
-function coerceValue(v){
-  if(v === '') return '';
-  if(v === 'true') return true;
-  if(v === 'false') return false;
-  // Preserve as string: leading zeros (zip codes, IDs like 007), leading +,
-  // and integers long enough to lose precision as JS numbers.
-  if(/^\+/.test(v)) return v;
-  if(/^-?0\d/.test(v)) return v;
-  if(/^-?\d{16,}$/.test(v)) return v;
-  if(!isNaN(v) && !isNaN(parseFloat(v))) return Number(v);
-  return v;
-}
-
-function csvToObj(text){
-  const rows = parseCsvRows(text);
-  if(!rows.length) throw new Error('Empty CSV input');
-  const headers = rows[0];
-  return rows.slice(1).map(cells => {
-    const obj = {};
-    headers.forEach((h, idx) => {
-      obj[h] = coerceValue(cells[idx] === undefined ? '' : cells[idx]);
-    });
-    return obj;
-  });
-}
-
-function escapeCsvField(v){
-  const s = (v === null || v === undefined) ? '' : String(v);
-  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-}
-
-function objToCsv(data){
-  const arr = Array.isArray(data) ? data : [data];
-  if(!arr.length) return '';
-  // Union of all keys, not just the first row's — later rows may add fields.
-  const headers = [];
-  arr.forEach(row => {
-    Object.keys(row || {}).forEach(k => { if(!headers.includes(k)) headers.push(k); });
-  });
-  const lines = [headers.map(escapeCsvField).join(',')];
-  arr.forEach(row => {
-    lines.push(headers.map(h => escapeCsvField(row ? row[h] : '')).join(','));
-  });
-  return lines.join('\n');
-}
-
-function parseInput(text, fmt){
-  if(fmt === 'json') return JSON.parse(text);
-  if(fmt === 'yaml') return jsyaml.load(text);
-  if(fmt === 'csv') return csvToObj(text);
-  if(fmt === 'xml') return xmlToObj(text);
-  if(fmt === 'toml') return parseToml(text);
-  if(fmt === 'env') return envToObj(text);
-  if(fmt === 'ini') return iniToObj(text);
-  if(fmt === 'properties') return propertiesToObj(text);
-  throw new Error('Unknown source format');
-}
-
-function serializeOutput(data, fmt){
-  if(fmt === 'json') return JSON.stringify(data, null, 2);
-  if(fmt === 'yaml') return jsyaml.dump(data);
-  if(fmt === 'csv') return objToCsv(data);
-  if(fmt === 'xml') return objToXml(data);
-  if(fmt === 'toml') return objToToml(data);
-  if(fmt === 'env') return objToEnv(data);
-  if(fmt === 'ini') return objToIni(data);
-  if(fmt === 'properties') return objToProperties(data);
-  if(fmt === 'k8s-configmap') return objToConfigMap(data);
-  if(fmt === 'k8s-secret') return objToSecret(data);
-  throw new Error('Unknown target format');
-}
-
 async function runPipeline(){
   for(let i = 0; i < pipes.length - 1; i++){
     pipes.forEach((p,idx) => p.classList.toggle('active', idx === i));
@@ -952,7 +369,142 @@ async function runPipeline(){
   }
 }
 
+// ---------------------------------------------------------------------------
+// GATE — nothing below this point is usable without a valid API key. Every
+// conversion is a real call to /v1/convert, so this is a real key, not a
+// cosmetic email-capture wall.
+// ---------------------------------------------------------------------------
+const GATE_KEY_STORAGE = 'transposeApiKey';
+let currentApiKey = null;
+
+const gateOverlay = document.getElementById('gateOverlay');
+const gateSignup = document.getElementById('gateSignup');
+const gateExisting = document.getElementById('gateExisting');
+const gateError = document.getElementById('gateError');
+const gateCloseBtn = document.getElementById('gateCloseBtn');
+
+function showGate(closable){
+  gateError.textContent = '';
+  gateSignup.style.display = 'block';
+  gateExisting.style.display = 'none';
+  gateCloseBtn.style.display = closable ? 'block' : 'none';
+  gateOverlay.style.display = 'flex';
+}
+function hideGate(){ gateOverlay.style.display = 'none'; }
+
+function revealTierLimits(){
+  document.querySelectorAll('.tier-limit').forEach(el => { el.style.display = 'inline'; });
+}
+
+function updateMeterFromUsage(usage){
+  const limitText = (usage.limit === null || usage.limit === undefined) ? '∞' : usage.limit;
+  // Free is a flat lifetime cap (never resets); Build/Scale reset monthly.
+  // "this month" would be misleading for the free tier, so the wording
+  // depends on which plan the key is actually on.
+  const period = usage.plan === 'free' ? 'used (free tier, no reset)' : 'used this month';
+  meter.innerHTML = `<b>${usage.used}</b> / ${limitText} calls ${period}${usage.plan ? ' · ' + usage.plan + ' plan' : ''}`;
+}
+
+async function validateKey(key){
+  try{
+    const res = await fetch('/api/usage', { headers: { 'Authorization': 'Bearer ' + key } });
+    if(!res.ok) return null;
+    return await res.json();
+  }catch(e){ return null; }
+}
+
+function applyUnlockedKey(key, usage){
+  currentApiKey = key;
+  localStorage.setItem(GATE_KEY_STORAGE, key);
+  updateMeterFromUsage(usage);
+  revealTierLimits();
+  hideGate();
+}
+
+async function initGate(){
+  const stored = localStorage.getItem(GATE_KEY_STORAGE);
+  if(stored){
+    const usage = await validateKey(stored);
+    if(usage){
+      applyUnlockedKey(stored, usage);
+      return;
+    }
+    localStorage.removeItem(GATE_KEY_STORAGE);
+  }
+  showGate(false);
+}
+
+document.getElementById('gateShowExistingBtn').addEventListener('click', () => {
+  gateError.textContent = '';
+  gateSignup.style.display = 'none';
+  gateExisting.style.display = 'block';
+});
+document.getElementById('gateShowSignupBtn').addEventListener('click', () => {
+  gateError.textContent = '';
+  gateExisting.style.display = 'none';
+  gateSignup.style.display = 'block';
+});
+gateCloseBtn.addEventListener('click', () => { if(currentApiKey) hideGate(); });
+
+document.getElementById('gateSignupBtn').addEventListener('click', async () => {
+  const email = document.getElementById('gateEmailInput').value.trim();
+  if(!email || !email.includes('@')){
+    gateError.textContent = 'Enter a valid email address.';
+    return;
+  }
+  const btn = document.getElementById('gateSignupBtn');
+  btn.textContent = 'Redirecting to Stripe…';
+  btn.disabled = true;
+  gateError.textContent = '';
+  try{
+    // Card verification happens on Stripe's own page (mode: 'setup' — a $0
+    // check, never charged). This keeps us from ever touching card data
+    // directly, and lets us dedupe free signups by the card's fingerprint
+    // instead of just by email (see server.js webhook handler), which is
+    // what actually stops one person from farming multiple 50-call keys.
+    const res = await fetch('/api/checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan: 'free', email })
+    });
+    const data = await res.json();
+    if(res.ok && data.checkoutUrl){
+      window.location.href = data.checkoutUrl;
+      return; // leaving the page
+    }
+    gateError.textContent = data.message || 'Could not start card verification. Try again.';
+  }catch(e){
+    gateError.textContent = 'Network error. Try again.';
+  }
+  btn.textContent = 'Verify card & get free key';
+  btn.disabled = false;
+});
+
+document.getElementById('gateExistingBtn').addEventListener('click', async () => {
+  const key = document.getElementById('gateExistingKeyInput').value.trim();
+  if(!key){
+    gateError.textContent = 'Paste your API key.';
+    return;
+  }
+  const btn = document.getElementById('gateExistingBtn');
+  btn.textContent = 'Checking…';
+  btn.disabled = true;
+  gateError.textContent = '';
+  const usage = await validateKey(key);
+  if(usage){
+    applyUnlockedKey(key, usage);
+  }else{
+    gateError.textContent = 'That key is invalid or has been revoked.';
+  }
+  btn.textContent = 'Continue';
+  btn.disabled = false;
+});
+
+document.getElementById('freeKeyBtn').addEventListener('click', () => showGate(true));
+
+// ---- Convert: a real call to the API, using the gated key ----
 document.getElementById('convertBtn').addEventListener('click', async () => {
+  if(!currentApiKey){ showGate(false); return; }
   const text = inputArea.value.trim();
   if(!text){
     outStatus.textContent = '';
@@ -960,25 +512,41 @@ document.getElementById('convertBtn').addEventListener('click', async () => {
     outputArea.style.color = 'var(--text-dim)';
     return;
   }
-  if(remaining <= 0){
-    outStatus.textContent = 'limit reached';
-    outStatus.style.color = 'var(--err)';
-    outputArea.textContent = "You've hit today's free limit. This is exactly the moment an API tier earns its keep — see below.";
-    outputArea.style.color = 'var(--err)';
-    return;
-  }
   try{
     await runPipeline();
-    const parsed = parseInput(text, fromFormat.value);
-    const result = serializeOutput(parsed, toFormat.value);
-    outputArea.textContent = result;
+    const res = await fetch('/v1/convert', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + currentApiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: fromFormat.value, to: toFormat.value, data: text })
+    });
+    const data = await res.json();
+
+    if(res.status === 401){
+      currentApiKey = null;
+      localStorage.removeItem(GATE_KEY_STORAGE);
+      pipes.forEach(p => p.classList.remove('active'));
+      showGate(false);
+      return;
+    }
+    if(res.status === 429){
+      outputArea.textContent = data.message || "You've hit your monthly limit. Upgrade below to keep converting.";
+      outputArea.style.color = 'var(--err)';
+      outStatus.textContent = 'limit reached';
+      outStatus.style.color = 'var(--err)';
+      pipes.forEach(p => p.classList.remove('active'));
+      return;
+    }
+    if(!res.ok){
+      throw new Error(data.message || data.error || 'Conversion failed');
+    }
+
+    outputArea.textContent = data.result;
     outputArea.style.color = 'var(--text)';
     outStatus.textContent = 'valid';
     outStatus.style.color = 'var(--ok)';
     inStatus.textContent = 'parsed ok';
     inStatus.style.color = 'var(--ok)';
-    remaining -= 1;
-    meter.innerHTML = `<b>${remaining}</b> / 500 free conversions left today · resets at midnight`;
+    updateMeterFromUsage(data.usage);
     pipes.forEach(p => p.classList.remove('active'));
     pipes[4].classList.add('active');
     pipes[4].textContent = 'done';
@@ -1023,82 +591,7 @@ document.getElementById('copyBtn').addEventListener('click', () => {
   setTimeout(() => btn.textContent = orig, 1200);
 });
 
-// ---- Free tier: get an API key with just an email ----
-const freeModal = document.createElement('div');
-freeModal.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:999;align-items:center;justify-content:center;padding:20px';
-freeModal.innerHTML = `
-  <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:28px;max-width:420px;width:100%;font-family:var(--sans)">
-    <h3 style="font-family:var(--sans);font-weight:600;font-size:18px;margin:0 0 6px;color:var(--text)">Get a free API key</h3>
-    <p style="color:var(--text-dim);font-size:13px;margin:0 0 16px;line-height:1.6">100 calls/month, no card required.</p>
-    <div id="freeStep1">
-      <input id="freeEmailInput" type="email" placeholder="you@example.com" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 12px;border-radius:6px;margin-bottom:12px;box-sizing:border-box">
-      <div style="display:flex;gap:10px;justify-content:flex-end">
-        <button id="freeCancelBtn" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-family:var(--mono);font-size:13px;padding:9px 16px;border-radius:6px;cursor:pointer">Cancel</button>
-        <button id="freeSubmitBtn" style="background:var(--accent);color:#1A1300;border:none;font-family:var(--mono);font-weight:600;font-size:13px;padding:9px 16px;border-radius:6px;cursor:pointer">Get key</button>
-      </div>
-    </div>
-    <div id="freeStep2" style="display:none">
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-family:var(--mono);font-size:13px;word-break:break-all;margin-bottom:10px" id="freeKeyResult"></div>
-      <div style="color:var(--err);font-size:12px;font-family:var(--sans);margin-bottom:14px">Save this now — it won't be shown again.</div>
-      <div style="display:flex;gap:10px;justify-content:flex-end">
-        <button id="freeCopyBtn" style="background:none;border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:13px;padding:9px 16px;border-radius:6px;cursor:pointer">Copy</button>
-        <button id="freeCloseBtn" style="background:var(--accent);color:#1A1300;border:none;font-family:var(--mono);font-weight:600;font-size:13px;padding:9px 16px;border-radius:6px;cursor:pointer">Done</button>
-      </div>
-    </div>
-  </div>`;
-document.body.appendChild(freeModal);
-
-function openFreeModal(){
-  freeModal.style.display = 'flex';
-  document.getElementById('freeStep1').style.display = 'block';
-  document.getElementById('freeStep2').style.display = 'none';
-  document.getElementById('freeEmailInput').value = '';
-}
-function closeFreeModal(){ freeModal.style.display = 'none'; }
-
-document.getElementById('freeKeyBtn').addEventListener('click', openFreeModal);
-document.getElementById('freeCancelBtn').addEventListener('click', closeFreeModal);
-document.getElementById('freeCloseBtn').addEventListener('click', closeFreeModal);
-freeModal.addEventListener('click', (e) => { if(e.target === freeModal) closeFreeModal(); });
-
-document.getElementById('freeSubmitBtn').addEventListener('click', async () => {
-  const email = document.getElementById('freeEmailInput').value.trim();
-  if(!email || !email.includes('@')){
-    document.getElementById('freeEmailInput').style.borderColor = 'var(--err)';
-    return;
-  }
-  const btn = document.getElementById('freeSubmitBtn');
-  btn.textContent = 'Issuing…';
-  btn.disabled = true;
-  try{
-    const res = await fetch('/api/signup-free', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email })
-    });
-    const data = await res.json();
-    if(res.ok && data.apiKey){
-      document.getElementById('freeKeyResult').textContent = data.apiKey;
-      document.getElementById('freeStep1').style.display = 'none';
-      document.getElementById('freeStep2').style.display = 'block';
-    }else{
-      btn.textContent = 'Get key';
-      btn.disabled = false;
-      document.getElementById('freeEmailInput').style.borderColor = 'var(--err)';
-    }
-  }catch(e){
-    btn.textContent = 'Get key';
-    btn.disabled = false;
-  }
-});
-
-document.getElementById('freeCopyBtn').addEventListener('click', () => {
-  navigator.clipboard.writeText(document.getElementById('freeKeyResult').textContent);
-  const btn = document.getElementById('freeCopyBtn');
-  const orig = btn.textContent;
-  btn.textContent = 'Copied';
-  setTimeout(() => btn.textContent = orig, 1200);
-});
+initGate();
 </script>
 
 </body>

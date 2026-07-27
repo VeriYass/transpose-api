@@ -103,6 +103,39 @@ async function main() {
     assert.strictEqual(key4Total, 1);
   });
 
+  await t('getUsageTotal sums across months while getUsageThisMonth only sums the current month', async () => {
+    await db.createApiKey('tp_test_lifetime', 'cust_lifetime', 'free');
+    await db.recordUsage('tp_test_lifetime'); // counts as "today", i.e. this month
+    // Insert a row for a past month directly, simulating usage from months ago —
+    // this is exactly what distinguishes a lifetime cap (Free) from a monthly
+    // one (Build/Scale): the lifetime cap must still count old months.
+    await db.pool.query(
+      `INSERT INTO usage_daily (api_key, day, count) VALUES ($1, $2, $3)`,
+      ['tp_test_lifetime', '2024-01-15', 7]
+    );
+    const thisMonth = await db.getUsageThisMonth('tp_test_lifetime');
+    const total = await db.getUsageTotal('tp_test_lifetime');
+    assert.strictEqual(thisMonth, 1); // old-month row correctly excluded
+    assert.strictEqual(total, 8); // 1 (today) + 7 (old month) — both counted
+  });
+
+  await t('getCustomerIdByEmail finds the right customer scoped by plan', async () => {
+    await db.upsertCustomer('cust_email_1', { email: 'dupe@example.com', plan: 'free', status: 'active' });
+    const found = await db.getCustomerIdByEmail('dupe@example.com', 'free');
+    assert.strictEqual(found, 'cust_email_1');
+  });
+
+  await t('getCustomerIdByEmail returns null for an unknown email', async () => {
+    const found = await db.getCustomerIdByEmail('never-signed-up@example.com', 'free');
+    assert.strictEqual(found, null);
+  });
+
+  await t('getCustomerIdByEmail is scoped by plan (a free-tier email lookup should not match a build customer)', async () => {
+    await db.upsertCustomer('cust_email_2', { email: 'paid@example.com', plan: 'build', status: 'active' });
+    const found = await db.getCustomerIdByEmail('paid@example.com', 'free');
+    assert.strictEqual(found, null);
+  });
+
   await t('two customers can each have their own active key simultaneously', async () => {
     await db.upsertCustomer('cust_5', { email: 'b@example.com', plan: 'free', status: 'active' });
     await db.createApiKey('tp_test_5', 'cust_5', 'free');
