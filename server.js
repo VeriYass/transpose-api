@@ -219,6 +219,7 @@ app.post('/api/checkout', async (req, res) => {
     try {
       const session = await stripe.checkout.sessions.create({
         mode: 'setup',
+        payment_method_types: ['card'],
         customer_email: email,
         success_url: `${process.env.APP_URL || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}&plan=free`,
         cancel_url: `${process.env.APP_URL || 'http://localhost:3000'}/cancel`,
