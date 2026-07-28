@@ -7,6 +7,7 @@
 // so the app can never silently fall back to ephemeral storage again.
 
 const { Pool } = require('pg');
+const { nanoid } = require('nanoid');
 
 if (!process.env.DATABASE_URL) {
   throw new Error(
@@ -68,6 +69,24 @@ async function initSchema() {
       PRIMARY KEY (api_key, day)
     )
   `);
+  // Controlled gate (Yasser): no card-verification Stripe session gets
+  // created for the free tier until the email itself has been confirmed via
+  // a one-time link. Card entry is structurally unreachable without a valid,
+  // unconsumed token — see the /verify-email route in server.js, which is
+  // the ONLY place that calls stripe.checkout.sessions.create for plan=free.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_verifications (
+      token TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      plan TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      consumed_at TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_email_verifications_email ON email_verifications (email)
+  `);
 }
 
 // ---- Customers ---- keyed by Stripe customer ID.
@@ -105,9 +124,20 @@ async function getCustomer(stripeCustomerId) {
 // existing key instead of minting a new one (which would otherwise let
 // anyone reset their lifetime free quota just by resubmitting the form).
 async function getCustomerIdByEmail(email, plan) {
+  // Bug found while validating the dedup fix: ORDER BY updated_at DESC picks
+  // the MOST RECENT customer row for this email — but once the webhook
+  // started recording a "duplicate_signup" row (no key attached) for every
+  // repeat attempt, that duplicate row is what's most recent, and it would
+  // shadow the original customer that actually holds the key. Preferring
+  // rows with an active key first fixes that regardless of how many
+  // duplicate-tracking rows pile up under the same email.
   const { rows } = await pool.query(
-    `SELECT stripe_customer_id FROM customers WHERE email = $1 AND plan = $2
-     ORDER BY updated_at DESC LIMIT 1`,
+    `SELECT c.stripe_customer_id
+     FROM customers c
+     LEFT JOIN api_keys ak ON ak.stripe_customer_id = c.stripe_customer_id AND ak.active = true
+     WHERE c.email = $1 AND c.plan = $2
+     ORDER BY (ak.api_key IS NOT NULL) DESC, c.updated_at ASC
+     LIMIT 1`,
     [email, plan]
   );
   return rows[0] ? rows[0].stripe_customer_id : null;
@@ -223,6 +253,39 @@ async function getUsageTotal(apiKey) {
   return Number(rows[0].total);
 }
 
+// ---- Email verification (controlled gate ahead of card entry) ----
+const VERIFICATION_TTL_MINUTES = 30;
+
+// One-time, expiring token tying an email to the plan it's trying to sign
+// up for. Nothing downstream (i.e. stripe.checkout.sessions.create) may run
+// for that email until this token is presented and consumed.
+async function createEmailVerification(email, plan) {
+  const token = nanoid(32);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + VERIFICATION_TTL_MINUTES * 60 * 1000);
+  await pool.query(
+    `INSERT INTO email_verifications (token, email, plan, created_at, expires_at)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [token, email, plan, now.toISOString(), expiresAt.toISOString()]
+  );
+  return token;
+}
+
+// Single-use: a token can only ever succeed once. Returns { email, plan } on
+// a valid, unexpired, not-yet-consumed token; null otherwise (expired,
+// already used, or never existed — all treated identically to the caller,
+// since none of those should ever let a Stripe session get created).
+async function consumeEmailVerification(token) {
+  const { rows } = await pool.query(
+    `UPDATE email_verifications
+     SET consumed_at = now()
+     WHERE token = $1 AND consumed_at IS NULL AND expires_at > now()
+     RETURNING email, plan`,
+    [token]
+  );
+  return rows[0] || null;
+}
+
 module.exports = {
   pool,
   initSchema,
@@ -238,4 +301,6 @@ module.exports = {
   recordUsage,
   getUsageThisMonth,
   getUsageTotal,
+  createEmailVerification,
+  consumeEmailVerification,
 };

@@ -10,6 +10,7 @@ const db = require('./db');
 const { PLANS, planForPriceId } = require('./plans');
 const { requireApiKey, authenticateApiKey } = require('./middleware');
 const { convert, SUPPORTED_FORMATS } = require('./convert');
+const mailer = require('./mailer');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_missing');
 const app = express();
@@ -58,24 +59,33 @@ app.post(
               const setupIntent = await stripe.setupIntents.retrieve(session.setup_intent);
               const paymentMethod = await stripe.paymentMethods.retrieve(setupIntent.payment_method);
               const fingerprint = paymentMethod.card?.fingerprint || null;
+              const email = session.customer_details?.email;
 
-              const existingCustomerId = fingerprint
-                ? await db.getCustomerIdByCardFingerprint(fingerprint)
-                : null;
+              // Two independent checks, because neither alone is reliable:
+              // fingerprint catches the same card under a different email,
+              // but Apple Pay/Google Pay tokenize to a device-specific DPAN
+              // and can legitimately produce a different fingerprint for
+              // the *same physical card* (confirmed in Stripe's own docs).
+              // Email catches that case. This is also the authoritative
+              // guard against a race with the /api/checkout short-circuit
+              // above (two concurrent signups for the same email).
+              const existingCustomerId =
+                (fingerprint ? await db.getCustomerIdByCardFingerprint(fingerprint) : null) ||
+                (email ? await db.getCustomerIdByEmail(email, 'free') : null);
 
               if (existingCustomerId) {
-                // This card already has a free key under a different
-                // customer/email. Record this new customer id (so we have
-                // an audit trail of the attempt) but do NOT mint a second
-                // key — /api/key-for-session falls back to a fingerprint
-                // lookup so this session still resolves to the ORIGINAL key.
+                // Same card OR same email already has a free key under a
+                // different customer id. Record this new customer id (so we
+                // have an audit trail of the attempt) but do NOT mint a
+                // second key — /api/key-for-session falls back to both
+                // lookups so this session still resolves to the ORIGINAL key.
                 await db.upsertCustomer(stripeCustomerId, {
-                  email: session.customer_details?.email,
+                  email,
                   plan: 'free',
-                  status: 'duplicate_card',
+                  status: 'duplicate_signup',
                   cardFingerprint: fingerprint,
                 });
-                console.log(`⚠️  Free signup ${stripeCustomerId} reused a card already tied to ${existingCustomerId} — no new key issued.`);
+                console.log(`⚠️  Free signup ${stripeCustomerId} (${email || 'no email'}) matches existing free customer ${existingCustomerId} — no new key issued.`);
                 return;
               }
 
@@ -217,22 +227,54 @@ app.post('/api/checkout', async (req, res) => {
   if (plan === 'free') {
     if (!email) return res.status(400).json({ error: 'email_required' });
     try {
-      const session = await stripe.checkout.sessions.create({
-        mode: 'setup',
-        payment_method_types: ['card'],
-        customer_email: email,
-        // setup mode does NOT create a Stripe Customer automatically — without
-        // this, session.customer comes back null, and the webhook's insert
-        // into customers.stripe_customer_id (NOT NULL PRIMARY KEY) fails,
-        // silently swallowed by the try/catch, so no key is ever issued.
-        customer_creation: 'always',
-        success_url: `${process.env.APP_URL || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}&plan=free`,
-        cancel_url: `${process.env.APP_URL || 'http://localhost:3000'}/cancel`,
+      // Fix (spotted by Yasser): the fingerprint dedup in the webhook below
+      // only catches repeats when Stripe can compute the fingerprint from
+      // the real card number. For Apple Pay / Google Pay, Stripe computes it
+      // from a device-specific tokenized number (DPAN) instead — Stripe's
+      // own docs confirm the same physical card re-added or used from a
+      // different device can produce a DIFFERENT fingerprint. So a wallet
+      // payer resubmitting this form with the same email could keep getting
+      // a fresh 50-call allowance forever, fingerprint check or not.
+      // getCustomerIdByEmail already existed in db.js (built + unit tested)
+      // but was never actually called here — this wires it in as the
+      // primary, payment-method-independent check, with fingerprint as a
+      // secondary backstop (see the webhook handler) against the same card
+      // being used under several different emails.
+      const existingCustomerId = await db.getCustomerIdByEmail(email, 'free');
+      if (existingCustomerId) {
+        const existingKey = await db.getApiKeyByCustomer(existingCustomerId);
+        if (existingKey) {
+          const used = await db.getUsageTotal(existingKey);
+          const cap = PLANS.free.limit;
+          return res.json({
+            apiKey: existingKey,
+            existing: true,
+            used,
+            cap,
+            capReached: used >= cap,
+            message: used >= cap
+              ? `This email's free key has used all ${cap} lifetime calls — upgrade to keep converting.`
+              : "This email already has a free Transpose key — reusing it instead of issuing a new one.",
+          });
+        }
+      }
+
+      // Controlled gate (Yasser): no Stripe card-verification session gets
+      // created here anymore. Instead, we email a one-time confirmation
+      // link — clicking it is the ONLY path that reaches
+      // stripe.checkout.sessions.create for the free plan (see GET
+      // /verify-email below). This closes the "just type any email, real
+      // or not" gap the dedup checks above can't close on their own.
+      const token = await db.createEmailVerification(email, 'free');
+      const verifyUrl = `${process.env.APP_URL || 'http://localhost:3000'}/verify-email?token=${token}`;
+      await mailer.sendVerificationEmail(email, verifyUrl);
+      return res.json({
+        pendingVerification: true,
+        message: `Check ${email} for a confirmation link — click it to continue to card verification. The link expires in 30 minutes.`,
       });
-      return res.json({ checkoutUrl: session.url });
     } catch (err) {
-      console.error('Free checkout session creation failed:', err.message);
-      return res.status(500).json({ error: 'checkout_failed', message: err.message });
+      console.error('Free signup verification-email step failed:', err.message);
+      return res.status(500).json({ error: 'verification_failed', message: err.message });
     }
   }
 
@@ -259,6 +301,39 @@ app.post('/api/checkout', async (req, res) => {
   }
 });
 
+// ---- Controlled gate: the ONLY route that creates a free-plan Stripe
+// checkout session. Reached exclusively by clicking the link sent in
+// /api/checkout's verification email — there is no other path to it. A
+// token consumes itself on first use (see db.consumeEmailVerification),
+// so replaying an old email link can't spawn a second session.
+app.get('/verify-email', async (req, res) => {
+  const { token } = req.query || {};
+  if (!token) return res.status(400).send('Missing verification token.');
+
+  const result = await db.consumeEmailVerification(String(token));
+  if (!result) {
+    return res.status(400).send(
+      'This verification link is invalid, expired, or has already been used. ' +
+      'Go back to the site and request a new one.'
+    );
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'setup',
+      payment_method_types: ['card'],
+      customer_email: result.email,
+      customer_creation: 'always',
+      success_url: `${process.env.APP_URL || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}&plan=free`,
+      cancel_url: `${process.env.APP_URL || 'http://localhost:3000'}/cancel`,
+    });
+    return res.redirect(303, session.url);
+  } catch (err) {
+    console.error('Post-verification checkout session creation failed:', err.message);
+    return res.status(500).send('Could not start card verification. Go back to the site and try again.');
+  }
+});
+
 // ---- After-checkout key retrieval ----
 // Stripe redirects to /success?session_id={CHECKOUT_SESSION_ID}[&plan=free].
 // The success page polls this endpoint until the webhook has issued the key.
@@ -278,9 +353,11 @@ app.get('/api/key-for-session', async (req, res) => {
       let apiKey = await db.getApiKeyByCustomer(session.customer);
       if (!apiKey) {
         // No key under THIS session's customer id — either the webhook
-        // hasn't run yet, or (duplicate-card case) the key actually lives
+        // hasn't run yet, or (duplicate-signup case) the key actually lives
         // under an earlier customer id. Try resolving by card fingerprint
-        // before giving up and telling the client to keep polling.
+        // first, then by email (fingerprint alone misses Apple Pay/Google
+        // Pay repeats — see the webhook handler's comment) before giving up
+        // and telling the client to keep polling.
         try {
           const setupIntent = await stripe.setupIntents.retrieve(session.setup_intent);
           const paymentMethod = await stripe.paymentMethods.retrieve(setupIntent.payment_method);
@@ -289,8 +366,12 @@ app.get('/api/key-for-session', async (req, res) => {
             const existingCustomerId = await db.getCustomerIdByCardFingerprint(fingerprint);
             if (existingCustomerId) apiKey = await db.getApiKeyByCustomer(existingCustomerId);
           }
+          if (!apiKey && session.customer_details?.email) {
+            const existingCustomerId = await db.getCustomerIdByEmail(session.customer_details.email, 'free');
+            if (existingCustomerId) apiKey = await db.getApiKeyByCustomer(existingCustomerId);
+          }
         } catch (lookupErr) {
-          console.error('Fingerprint fallback lookup failed:', lookupErr.message);
+          console.error('Duplicate-signup fallback lookup failed:', lookupErr.message);
         }
       }
       if (!apiKey) return res.status(202).json({ status: 'pending' });
